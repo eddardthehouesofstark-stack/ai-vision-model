@@ -1,4 +1,5 @@
 export type CameraStatus = 'online' | 'offline' | 'maintenance';
+export type ProcessingStatus = 'waiting' | 'uploading' | 'processing' | 'indexing' | 'completed' | 'failed';
 
 export interface Camera {
   id: string;
@@ -15,6 +16,10 @@ export interface Camera {
   event_count: number;
   thumbnail_url?: string;
   video_url?: string;
+  is_uploaded?: boolean;
+  duration_seconds?: number;
+  upload_date?: string;
+  processing_status?: ProcessingStatus;
 }
 
 export interface VideoRecord {
@@ -37,6 +42,7 @@ export interface VideoRecord {
   thumbnail_url?: string;
   video_url?: string;
   is_uploaded?: boolean;
+  indexed_events?: any[];
 }
 
 export interface BoundingBox {
@@ -126,4 +132,31 @@ export interface SystemSettings {
   storage_capacity_bytes: number;
 }
 
-export type ActiveTab = 'dashboard' | 'search' | 'cameras' | 'upload' | 'history' | 'settings';
+export type ActiveTab =
+  | 'dashboard'
+  | 'search'
+  | 'cameras'
+  | 'camera-dashboard'
+  | 'upload'
+  | 'history'
+  | 'settings';
+
+export interface UploadQueueItem {
+  id: string;
+  file?: File;
+  presetUrl?: string;
+  videoName: string;
+  cameraName: string;
+  cameraId: string;
+  fileSize: number;
+  duration: number;
+  uploadProgress: number;
+  processingProgress: number;
+  status: ProcessingStatus;
+  errorMessage?: string;
+  uploadedVideoId?: string;
+  indexedEventsCount?: number;
+  thumbnailUrl?: string;
+  videoUrl?: string;
+  createdAt?: string;
+}

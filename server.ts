@@ -481,6 +481,10 @@ let CAMERAS: any[] = [
     event_count: 42,
     thumbnail_url: THUMBS.gate_2s,
     video_url: VIDEOS_SRC.gate,
+    duration_seconds: 12.0,
+    upload_date: '2026-10-08',
+    processing_status: 'completed',
+    is_uploaded: true,
   },
   {
     id: 'cam_02',
@@ -497,6 +501,10 @@ let CAMERAS: any[] = [
     event_count: 87,
     thumbnail_url: THUMBS.parking_3s,
     video_url: VIDEOS_SRC.parking,
+    duration_seconds: 12.0,
+    upload_date: '2026-10-08',
+    processing_status: 'completed',
+    is_uploaded: true,
   },
   {
     id: 'cam_03',
@@ -513,6 +521,10 @@ let CAMERAS: any[] = [
     event_count: 29,
     thumbnail_url: THUMBS.corridor_2s,
     video_url: VIDEOS_SRC.corridor,
+    duration_seconds: 12.0,
+    upload_date: '2026-10-08',
+    processing_status: 'completed',
+    is_uploaded: true,
   },
   {
     id: 'cam_04',
@@ -529,6 +541,10 @@ let CAMERAS: any[] = [
     event_count: 64,
     thumbnail_url: THUMBS.dock_3s,
     video_url: VIDEOS_SRC.dock,
+    duration_seconds: 12.0,
+    upload_date: '2026-10-08',
+    processing_status: 'completed',
+    is_uploaded: true,
   },
   {
     id: 'cam_05',
@@ -545,6 +561,10 @@ let CAMERAS: any[] = [
     event_count: 6,
     thumbnail_url: THUMBS.gate_6s,
     video_url: VIDEOS_SRC.gate,
+    duration_seconds: 12.0,
+    upload_date: '2026-10-08',
+    processing_status: 'completed',
+    is_uploaded: true,
   },
 ];
 
@@ -1459,9 +1479,58 @@ app.post(
   try {
     const files = req.files as Express.Multer.File[] | undefined;
     const file = (files && files[0]) || req.file;
-    const { camera_id, recorded_date, recorded_start_time, recorded_end_time, duration_seconds, preset_video_url } = req.body;
+    const {
+      camera_id,
+      camera_name,
+      location,
+      create_camera,
+      recorded_date,
+      recorded_start_time,
+      recorded_end_time,
+      duration_seconds,
+      preset_video_url,
+    } = req.body;
 
-    const targetCamera = CAMERAS.find((c) => c.camera_id === camera_id || c.id === camera_id) || CAMERAS[0];
+    const camNameReq = (camera_name || '').trim();
+    const camIdReq = (camera_id || '').trim();
+    const isNewCamera =
+      create_camera === 'true' ||
+      create_camera === true ||
+      Boolean(camNameReq && !CAMERAS.some((c) => c.camera_id === camIdReq));
+
+    let targetCamera = CAMERAS.find(
+      (c) =>
+        (camIdReq && (c.camera_id === camIdReq || c.id === camIdReq)) ||
+        (camNameReq && c.name.toLowerCase() === camNameReq.toLowerCase())
+    );
+
+    if (!targetCamera || isNewCamera) {
+      let finalCamId = camIdReq;
+      if (!finalCamId || CAMERAS.some((c) => c.camera_id === finalCamId && c !== targetCamera)) {
+        finalCamId = `CAM-${String(CAMERAS.length + 1).padStart(2, '0')}`;
+      }
+      const finalCamName = camNameReq || `Camera ${finalCamId}`;
+      const finalLoc = (location || '').trim() || finalCamName;
+
+      targetCamera = {
+        id: `cam_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+        camera_id: finalCamId.toUpperCase(),
+        name: finalCamName,
+        location: finalLoc,
+        resolution: '1080p (1920x1080)',
+        fps: 30,
+        rtsp_url: `rtsp://192.168.10.${Math.floor(Math.random() * 50) + 10}:554/live`,
+        status: 'online',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        video_count: 0,
+        event_count: 0,
+        thumbnail_url: THUMBS.gate_2s,
+        video_url: '',
+        is_uploaded: true,
+      };
+      CAMERAS.push(targetCamera);
+    }
 
     const videoId = `vid_${Date.now()}`;
     const filename = file ? file.originalname : req.body.filename || `cctv_capture_${Date.now()}.mp4`;
@@ -1567,13 +1636,26 @@ app.post(
       newVideo.indexed_events_count = indexedEvents.length;
       if (indexedEvents[0]?.thumbnail_url) {
         newVideo.thumbnail_url = indexedEvents[0].thumbnail_url;
+        targetCamera.thumbnail_url = indexedEvents[0].thumbnail_url;
       }
       if (indexedEvents[0]?.video_url) {
         newVideo.video_url = indexedEvents[0].video_url;
+        targetCamera.video_url = indexedEvents[0].video_url;
+      }
+    } else {
+      if (effectiveVideoUrl) {
+        targetCamera.video_url = effectiveVideoUrl;
       }
     }
 
     targetCamera.video_count += 1;
+    targetCamera.duration_seconds = detectedDuration;
+    targetCamera.upload_date = recorded_date || new Date().toISOString().split('T')[0];
+    targetCamera.processing_status = 'completed';
+    targetCamera.is_uploaded = true;
+    if (camNameReq) {
+      targetCamera.name = camNameReq;
+    }
 
     res.status(201).json({
       ...newVideo,
@@ -1642,6 +1724,86 @@ app.post(['/start-indexing', '/api/start-indexing'], async (req: Request, res: R
     res.status(500).json({ error: err?.message || 'Failed to start indexing' });
   }
 });
+
+// Reprocess video without re-uploading
+app.post(
+  ['/api/videos/reprocess', '/api/videos/:id/reprocess', '/reprocess-video'],
+  async (req: Request, res: Response) => {
+    try {
+      const videoId = req.params.id || req.body.video_id;
+      const vid = VIDEOS.find((v) => v.id === videoId || v.filename === videoId);
+      if (!vid) return res.status(404).json({ error: 'Video not found to reprocess' });
+
+      const targetCamera =
+        CAMERAS.find((c) => c.camera_id === vid.camera_id || c.id === vid.camera_id) || CAMERAS[0];
+
+      let diskVideoPath = '';
+      if (vid.storage_path) {
+        const cand = path.resolve(process.cwd(), vid.storage_path.replace(/^\//, ''));
+        if (fs.existsSync(cand)) diskVideoPath = cand;
+      }
+      if (!diskVideoPath && vid.video_url) {
+        const cand = path.resolve(process.cwd(), vid.video_url.replace(/^\//, ''));
+        if (fs.existsSync(cand)) diskVideoPath = cand;
+      }
+      if (!diskVideoPath && vid.video_url) {
+        const cand = path.resolve(process.cwd(), 'public', vid.video_url.replace(/^\//, ''));
+        if (fs.existsSync(cand)) diskVideoPath = cand;
+      }
+
+      if (!diskVideoPath || !fs.existsSync(diskVideoPath)) {
+        return res.status(400).json({ error: 'Video source file not found on disk for reprocessing' });
+      }
+
+      const jobId = `job_${Date.now()}`;
+      INDEXING_JOBS[jobId] = {
+        id: jobId,
+        video_id: vid.id,
+        camera_id: targetCamera.camera_id,
+        status: 'extracting_frames',
+        step: 'Extracting Frames',
+        progress: 30,
+        total_events: 0,
+        created_at: new Date().toISOString(),
+      };
+
+      vid.status = 'processing';
+      vid.processing_progress = 35;
+
+      const indexedEvents = await analyzeAndIndexUploadedVideo(
+        diskVideoPath,
+        targetCamera,
+        vid.filename,
+        vid.video_url || '',
+        vid.recorded_date,
+        vid.recorded_start_time,
+        req.body.incident_notes || '',
+        jobId
+      );
+
+      vid.status = 'completed';
+      vid.processing_progress = 100;
+      vid.indexed_events_count = indexedEvents.length;
+      targetCamera.event_count += indexedEvents.length;
+      if (indexedEvents[0]?.thumbnail_url) {
+        vid.thumbnail_url = indexedEvents[0].thumbnail_url;
+        targetCamera.thumbnail_url = indexedEvents[0].thumbnail_url;
+      }
+
+      res.json({
+        success: true,
+        video: vid,
+        job_id: jobId,
+        indexed_events_count: indexedEvents.length,
+        indexed_events: indexedEvents,
+        message: `Successfully reprocessed video. Indexed ${indexedEvents.length} events.`,
+      });
+    } catch (err: any) {
+      console.error('Reprocess error:', err);
+      res.status(500).json({ error: err?.message || 'Reprocessing failed' });
+    }
+  }
+);
 
 // Requirement 6 & 7: GET /indexing-status
 app.get(
@@ -1810,7 +1972,7 @@ app.get(['/event/:id', '/api/event/:id', '/api/events/:id'], (req: Request, res:
 // Requirement 7: POST /search
 app.post(['/search', '/api/search'], async (req: Request, res: Response) => {
   const startTime = performance.now();
-  const { query, camera_id, min_confidence = 0.55 } = req.body;
+  const { query, camera_id, camera_ids, min_confidence = 0.55 } = req.body;
 
   if (!query || typeof query !== 'string' || query.trim() === '') {
     return res.status(400).json({ error: 'Search query is required' });
@@ -1830,8 +1992,26 @@ app.post(['/search', '/api/search'], async (req: Request, res: Response) => {
     }
   }
 
-  if (camera_id) {
-    candidatePool = candidatePool.filter((e) => e.camera_id === camera_id);
+  // Multi-camera filtering: Support specific camera, multiple selected cameras, or all cameras by default
+  let targetCameraIds: string[] = [];
+  if (Array.isArray(camera_ids) && camera_ids.length > 0) {
+    targetCameraIds = camera_ids.map((id: any) => String(id).trim()).filter(Boolean);
+  } else if (typeof camera_id === 'string' && camera_id.trim()) {
+    if (camera_id.includes(',')) {
+      targetCameraIds = camera_id.split(',').map((id) => id.trim()).filter(Boolean);
+    } else {
+      targetCameraIds = [camera_id.trim()];
+    }
+  }
+
+  if (targetCameraIds.length > 0 && !targetCameraIds.includes('all')) {
+    candidatePool = candidatePool.filter((e) =>
+      targetCameraIds.some(
+        (tid) =>
+          e.camera_id.toUpperCase() === tid.toUpperCase() ||
+          e.camera_name.toLowerCase().includes(tid.toLowerCase())
+      )
+    );
   }
 
   // Strict Forensic Evaluation: Disqualify any candidate that fails requirements (Requirement 4: Never return unrelated events)

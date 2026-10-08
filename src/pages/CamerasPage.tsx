@@ -17,7 +17,7 @@ import { Camera, CameraStatus } from '../types';
 import { api } from '../services/api';
 
 export const CamerasPage: React.FC = () => {
-  const { cameras, refreshCameras, showNotification, videos, events, setSelectedEvidence } =
+  const { cameras, refreshCameras, showNotification, videos, events, setSelectedEvidence, setActiveTab } =
     useCCTV();
 
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -117,13 +117,22 @@ export const CamerasPage: React.FC = () => {
           </p>
         </div>
 
-        <button
-          onClick={handleOpenAdd}
-          className="px-4 py-2 bg-neutral-100 hover:bg-white text-neutral-950 font-medium text-xs rounded-md transition-colors flex items-center gap-2 self-start sm:self-auto"
-        >
-          <Plus className="w-3.5 h-3.5" />
-          <span>Register New Camera</span>
-        </button>
+        <div className="flex items-center gap-2 self-start sm:self-auto">
+          <button
+            onClick={() => setActiveTab('camera-dashboard')}
+            className="px-3.5 py-2 bg-neutral-900 hover:bg-neutral-800 text-neutral-200 hover:text-white border border-neutral-700 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5"
+          >
+            <Video className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Open Camera Dashboard</span>
+          </button>
+          <button
+            onClick={handleOpenAdd}
+            className="px-4 py-2 bg-neutral-100 hover:bg-white text-neutral-950 font-medium text-xs rounded-md transition-colors flex items-center gap-2"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>Register New Camera</span>
+          </button>
+        </div>
       </div>
 
       {/* Filters Bar */}

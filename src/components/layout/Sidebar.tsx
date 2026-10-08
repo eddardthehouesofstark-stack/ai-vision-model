@@ -18,10 +18,11 @@ export const Sidebar: React.FC = () => {
   const navItems: { id: ActiveTab; label: string; icon: React.ElementType }[] = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'search', label: 'Search Footage', icon: Search },
-    { id: 'cameras', label: 'Cameras', icon: Video },
-    { id: 'upload', label: 'Upload Video', icon: UploadCloud },
+    { id: 'camera-dashboard', label: 'Camera Dashboard', icon: Video },
+    { id: 'upload', label: 'Multi-Camera Upload', icon: UploadCloud },
+    { id: 'cameras', label: 'Channel Settings', icon: Sliders },
     { id: 'history', label: 'Search History', icon: History },
-    { id: 'settings', label: 'System & DB', icon: Sliders },
+    { id: 'settings', label: 'System Status', icon: ShieldCheck },
   ];
 
   const onlineCount = cameras.filter((c) => c.status === 'online').length;

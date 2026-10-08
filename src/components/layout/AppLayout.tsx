@@ -5,6 +5,7 @@ import { useCCTV } from '../../context/CCTVContext';
 import { DashboardPage } from '../../pages/DashboardPage';
 import { SearchPage } from '../../pages/SearchPage';
 import { CamerasPage } from '../../pages/CamerasPage';
+import { CameraDashboardPage } from '../../pages/CameraDashboardPage';
 import { UploadPage } from '../../pages/UploadPage';
 import { HistoryPage } from '../../pages/HistoryPage';
 import { SettingsPage } from '../../pages/SettingsPage';
@@ -22,6 +23,8 @@ export const AppLayout: React.FC = () => {
         return <SearchPage />;
       case 'cameras':
         return <CamerasPage />;
+      case 'camera-dashboard':
+        return <CameraDashboardPage />;
       case 'upload':
         return <UploadPage />;
       case 'history':

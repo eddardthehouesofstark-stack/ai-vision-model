@@ -21,8 +21,9 @@ export const Navbar: React.FC = () => {
   const navLinks: { id: ActiveTab; label: string }[] = [
     { id: 'dashboard', label: 'Dashboard' },
     { id: 'search', label: 'Video Search' },
-    { id: 'cameras', label: 'Cameras' },
-    { id: 'upload', label: 'Upload' },
+    { id: 'camera-dashboard', label: 'Camera Dashboard' },
+    { id: 'upload', label: 'Multi-Upload' },
+    { id: 'cameras', label: 'Channels' },
     { id: 'history', label: 'History' },
     { id: 'settings', label: 'Settings' },
   ];

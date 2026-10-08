@@ -32,7 +32,7 @@ interface CCTVContextType {
   setSearchResults: (res: SearchResultItem[]) => void;
   searchExecutionTime: number;
   answerSummary: string | null;
-  triggerSearch: (query: string, cameraId?: string, minConfidence?: number) => Promise<void>;
+  triggerSearch: (query: string, cameraId?: string | string[], minConfidence?: number) => Promise<void>;
   isSearching: boolean;
   notification: string | null;
   showNotification: (msg: string) => void;
@@ -113,14 +113,26 @@ export const CCTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const triggerSearch = useCallback(
-    async (queryText: string, cameraId?: string, minConfidence?: number) => {
+    async (queryText: string, cameraId?: string | string[], minConfidence?: number) => {
       if (!queryText.trim()) return;
       setIsSearching(true);
       setActiveQuery(queryText);
       try {
+        let camIdParam: string | undefined = undefined;
+        let camIdsParam: string[] | undefined = undefined;
+
+        if (Array.isArray(cameraId)) {
+          camIdsParam = cameraId;
+        } else if (typeof cameraId === 'string' && cameraId.includes(',')) {
+          camIdsParam = cameraId.split(',').map((s) => s.trim()).filter(Boolean);
+        } else if (typeof cameraId === 'string' && cameraId) {
+          camIdParam = cameraId;
+        }
+
         const res = await api.searchEvents({
           query: queryText,
-          camera_id: cameraId,
+          camera_id: camIdParam,
+          camera_ids: camIdsParam,
           min_confidence: minConfidence ?? (settings?.default_confidence_threshold || 0.55),
         });
         setSearchResults(res.results);

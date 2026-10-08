@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   UploadCloud,
   FileVideo,
@@ -12,14 +12,26 @@ import {
   Eye,
   Play,
   RotateCcw,
+  Plus,
+  Trash2,
+  Edit2,
+  Sparkles,
+  Camera as CameraIcon,
+  Check,
+  RefreshCw,
+  FolderPlus,
+  Sliders,
+  CheckSquare,
 } from 'lucide-react';
 import { useCCTV } from '../context/CCTVContext';
 import { api } from '../services/api';
+import { UploadQueueItem, ProcessingStatus } from '../types';
 
 export const UploadPage: React.FC = () => {
   const {
     cameras,
     videos,
+    events,
     refreshVideos,
     refreshEvents,
     refreshCameras,
@@ -29,664 +41,1062 @@ export const UploadPage: React.FC = () => {
     triggerSearch,
   } = useCCTV();
 
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [previewVideoUrl, setPreviewVideoUrl] = useState<string>('/videos/cctv_gate_night.mp4');
-  const [selectedCameraId, setSelectedCameraId] = useState<string>(
-    cameras[0]?.camera_id || 'CAM-01'
-  );
-  const [recordedDate, setRecordedDate] = useState<string>('2026-10-08');
-  const [startTime, setStartTime] = useState<string>('09:00:00');
-  const [endTime, setEndTime] = useState<string>('10:00:00');
-  const [incidentNotes, setIncidentNotes] = useState<string>('');
+  const [queue, setQueue] = useState<UploadQueueItem[]>([]);
+  const [isProcessingQueue, setIsProcessingQueue] = useState<boolean>(false);
+  const [activeConcurrency, setActiveConcurrency] = useState<number>(2);
+  const [globalRecordedDate, setGlobalRecordedDate] = useState<string>('2026-10-08');
+  const [globalStartTime, setGlobalStartTime] = useState<string>('09:00:00');
+  const [globalEndTime, setGlobalEndTime] = useState<string>('10:00:00');
+  const [globalIncidentNotes, setGlobalIncidentNotes] = useState<string>('');
   const [lastUploadedResult, setLastUploadedResult] = useState<any>(null);
 
-  // Pipeline simulation state
-  const [isUploading, setIsUploading] = useState<boolean>(false);
-  const [uploadStep, setUploadStep] = useState<number>(0);
-  const [uploadPercent, setUploadPercent] = useState<number>(0);
-
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const addMoreInputRef = useRef<HTMLInputElement>(null);
+
+  const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB per video limit
 
   const samplePresets = [
     {
-      name: 'Gate 1 Night Footage',
+      name: 'Main Entrance Gate 1',
       camId: 'CAM-01',
       file: 'gate1_night_20261008.mp4',
       url: '/videos/cctv_gate_night.mp4',
-      date: '2026-10-08',
-      start: '21:00:00',
-      end: '22:00:00',
+      duration: 12.0,
+      size: 42 * 1024 * 1024,
+      notes: 'Vehicle entry through North Gate, night surveillance',
     },
     {
-      name: 'Parking Lot Bay 14',
+      name: 'Underground Parking P1',
       camId: 'CAM-02',
       file: 'parking_lot_bay14.mp4',
       url: '/videos/cctv_parking_lot.mp4',
-      date: '2026-10-08',
-      start: '14:30:00',
-      end: '15:30:00',
+      duration: 12.0,
+      size: 38 * 1024 * 1024,
+      notes: 'Vehicle movement and pedestrian transit in basement parking',
     },
     {
-      name: 'Executive Corridor 3B',
+      name: 'Corporate Corridor 3B',
       camId: 'CAM-03',
       file: 'corridor_3b_pass.mp4',
       url: '/videos/cctv_corridor_office.mp4',
-      date: '2026-10-08',
-      start: '11:00:00',
-      end: '12:00:00',
+      duration: 12.0,
+      size: 29 * 1024 * 1024,
+      notes: 'Personnel walking in hallway carrying bags and briefcase',
     },
     {
-      name: 'Logistics Loading Dock',
+      name: 'Warehouse Loading Dock',
       camId: 'CAM-04',
       file: 'loading_dock_freight.mp4',
       url: '/videos/cctv_loading_dock.mp4',
-      date: '2026-10-08',
-      start: '15:15:00',
-      end: '16:15:00',
+      duration: 12.0,
+      size: 45 * 1024 * 1024,
+      notes: 'Freight delivery truck and logistics workers handling cargo',
     },
   ];
 
-  const handleSelectPreset = (preset: typeof samplePresets[0]) => {
-    setSelectedCameraId(preset.camId);
-    setRecordedDate(preset.date);
-    setStartTime(preset.start);
-    setEndTime(preset.end);
-    setPreviewVideoUrl(preset.url);
-    setSelectedFile(null);
-    showNotification(`Loaded video preset: ${preset.name}`);
-  };
-
-  const pipelineSteps = [
-    { title: 'Uploading', desc: 'Saving CCTV video to secure storage' },
-    { title: 'Extracting Frames', desc: 'Demuxing video & extracting keyframes with FFmpeg' },
-    { title: 'Detecting Objects', desc: 'Computer vision analysis for person, vehicles & bags' },
-    { title: 'Saving Events', desc: 'Writing verified vector event records to database' },
-    { title: 'Completed', desc: 'Video fully indexed and ready for natural language query' },
+  const cameraNamePresets = [
+    'Main Gate',
+    'Parking Lot',
+    'Lobby Entrance',
+    'Warehouse Dock',
+    'Perimeter Fence',
+    'Elevator Bay',
+    'Server Room',
+    'East Corridor',
   ];
 
-  const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB video processing limit
+  // Helper to suggest next camera ID
+  const getNextCameraId = useCallback(
+    (offset = 0) => {
+      const existingCamNumbers = cameras
+        .map((c) => {
+          const match = c.camera_id.match(/CAM-(\d+)/i);
+          return match ? parseInt(match[1], 10) : 0;
+        })
+        .filter((n) => !isNaN(n));
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
+      const queueNumbers = queue
+        .map((q) => {
+          const match = q.cameraId.match(/CAM-(\d+)/i);
+          return match ? parseInt(match[1], 10) : 0;
+        })
+        .filter((n) => !isNaN(n));
+
+      const maxNumber = Math.max(0, ...existingCamNumbers, ...queueNumbers);
+      return `CAM-${String(maxNumber + 1 + offset).padStart(2, '0')}`;
+    },
+    [cameras, queue]
+  );
+
+  // Helper to suggest camera name from file name
+  const suggestCameraName = (filename: string, index = 0): string => {
+    const clean = filename.toLowerCase();
+    if (clean.includes('gate') || clean.includes('entrance')) return 'Main Entrance Gate';
+    if (clean.includes('park') || clean.includes('garage')) return 'Underground Parking';
+    if (clean.includes('corridor') || clean.includes('hall') || clean.includes('office')) return 'Executive Corridor';
+    if (clean.includes('dock') || clean.includes('freight') || clean.includes('load')) return 'Warehouse Loading Dock';
+    if (clean.includes('lobby')) return 'Building Lobby';
+    if (clean.includes('fence') || clean.includes('perimeter')) return 'Perimeter Security Fence';
+    if (clean.includes('server')) return 'Server Facility Room';
+    return cameraNamePresets[index % cameraNamePresets.length] || `Camera Feed ${index + 1}`;
+  };
+
+  // Add multiple files into queue
+  const addFilesToQueue = (files: File[]) => {
+    const newItems: UploadQueueItem[] = [];
+
+    files.forEach((file, idx) => {
       if (file.size > MAX_FILE_SIZE) {
         showNotification(
-          `File size (${(file.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 100MB limit. Please choose a clip under 100MB or select a test preset.`
+          `File "${file.name}" (${(file.size / (1024 * 1024)).toFixed(1)}MB) exceeds 100MB limit and was skipped.`
         );
         return;
       }
-      setSelectedFile(file);
-      const objUrl = URL.createObjectURL(file);
-      setPreviewVideoUrl(objUrl);
+
+      const assignedId = getNextCameraId(newItems.length);
+      const assignedName = suggestCameraName(file.name, queue.length + newItems.length);
+
+      const newItem: UploadQueueItem = {
+        id: `queue_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+        file,
+        videoName: file.name,
+        cameraName: assignedName,
+        cameraId: assignedId,
+        fileSize: file.size,
+        duration: 12.0, // default until probe
+        uploadProgress: 0,
+        processingProgress: 0,
+        status: 'waiting',
+        createdAt: new Date().toISOString(),
+      };
+
+      // Probe browser video metadata to get exact duration
+      try {
+        const objectUrl = URL.createObjectURL(file);
+        const tempVideo = document.createElement('video');
+        tempVideo.preload = 'metadata';
+        tempVideo.src = objectUrl;
+        tempVideo.onloadedmetadata = () => {
+          if (tempVideo.duration && !isNaN(tempVideo.duration)) {
+            setQueue((prev) =>
+              prev.map((item) =>
+                item.id === newItem.id ? { ...item, duration: Number(tempVideo.duration.toFixed(1)) } : item
+              )
+            );
+          }
+          URL.revokeObjectURL(objectUrl);
+        };
+      } catch {
+        // keep default
+      }
+
+      newItems.push(newItem);
+    });
+
+    if (newItems.length > 0) {
+      setQueue((prev) => [...prev, ...newItems]);
+      showNotification(`Added ${newItems.length} video(s) to multi-camera queue.`);
     }
   };
 
+  // Add all presets at once
+  const handleAddAllPresets = () => {
+    const newItems: UploadQueueItem[] = samplePresets.map((preset, idx) => ({
+      id: `queue_preset_${Date.now()}_${idx}`,
+      presetUrl: preset.url,
+      videoName: preset.file,
+      cameraName: preset.name,
+      cameraId: preset.camId,
+      fileSize: preset.size,
+      duration: preset.duration,
+      uploadProgress: 0,
+      processingProgress: 0,
+      status: 'waiting',
+      createdAt: new Date().toISOString(),
+    }));
+
+    setQueue((prev) => [...prev, ...newItems]);
+    showNotification(`Added all 4 multi-camera CCTV presets to queue.`);
+  };
+
+  // Add single preset
+  const handleAddSinglePreset = (preset: (typeof samplePresets)[0]) => {
+    const newItem: UploadQueueItem = {
+      id: `queue_preset_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      presetUrl: preset.url,
+      videoName: preset.file,
+      cameraName: preset.name,
+      cameraId: preset.camId,
+      fileSize: preset.size,
+      duration: preset.duration,
+      uploadProgress: 0,
+      processingProgress: 0,
+      status: 'waiting',
+      createdAt: new Date().toISOString(),
+    };
+
+    setQueue((prev) => [...prev, newItem]);
+    showNotification(`Added "${preset.name}" preset to queue.`);
+  };
+
+  // Handle file change
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const files = Array.from(e.target.files);
+      addFilesToQueue(files);
+      e.target.value = '';
+    }
+  };
+
+  // Drag and drop handler
   const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      const file = e.dataTransfer.files[0];
-      if (file.size > MAX_FILE_SIZE) {
-        showNotification(
-          `File size (${(file.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 100MB limit. Please choose a clip under 100MB or select a test preset.`
-        );
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const files = Array.from(e.dataTransfer.files).filter(
+        (f) => f.type.startsWith('video/') || /\.(mp4|mov|avi|mkv|webm|m4v|ts)$/i.test(f.name)
+      );
+      if (files.length === 0) {
+        showNotification('Please drop valid video files (MP4, MOV, MKV, AVI, WebM).');
         return;
       }
-      setSelectedFile(file);
-      const objUrl = URL.createObjectURL(file);
-      setPreviewVideoUrl(objUrl);
+      addFilesToQueue(files);
     }
   };
 
-  const handleStartUpload = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // Update item field in queue
+  const updateQueueItem = (id: string, updates: Partial<UploadQueueItem>) => {
+    setQueue((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, ...updates } : item))
+    );
+  };
 
-    if (selectedFile && selectedFile.size > MAX_FILE_SIZE) {
-      showNotification(
-        `File size (${(selectedFile.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 100MB limit. Please select a clip under 100MB or choose a preset.`
-      );
+  // Remove item from queue
+  const removeQueueItem = (id: string) => {
+    setQueue((prev) => prev.filter((item) => item.id !== id));
+  };
+
+  // Clear completed items
+  const clearCompleted = () => {
+    setQueue((prev) => prev.filter((item) => item.status !== 'completed'));
+    showNotification('Cleared completed items from queue.');
+  };
+
+  // Process a single item
+  const processQueueItem = async (item: UploadQueueItem): Promise<boolean> => {
+    try {
+      updateQueueItem(item.id, {
+        status: 'uploading',
+        uploadProgress: 15,
+        processingProgress: 10,
+        errorMessage: undefined,
+      });
+
+      const formData = new FormData();
+      if (item.file) {
+        formData.append('video_file', item.file);
+      } else if (item.presetUrl) {
+        formData.append('preset_video_url', item.presetUrl);
+        formData.append('filename', item.videoName);
+      }
+      formData.append('camera_id', item.cameraId);
+      formData.append('camera_name', item.cameraName);
+      formData.append('create_camera', 'true');
+      formData.append('recorded_date', globalRecordedDate);
+      formData.append('recorded_start_time', globalStartTime);
+      formData.append('recorded_end_time', globalEndTime);
+      if (globalIncidentNotes) {
+        formData.append('incident_notes', globalIncidentNotes);
+      }
+
+      // Smooth simulation of stages during indexing
+      const stageTimer = setInterval(() => {
+        setQueue((prev) =>
+          prev.map((it) => {
+            if (it.id !== item.id) return it;
+            if (it.uploadProgress < 100) {
+              return { ...it, uploadProgress: Math.min(100, it.uploadProgress + 25) };
+            }
+            if (it.status === 'uploading') {
+              return { ...it, status: 'processing', processingProgress: 40 };
+            }
+            if (it.status === 'processing') {
+              return { ...it, status: 'indexing', processingProgress: 75 };
+            }
+            return it;
+          })
+        );
+      }, 700);
+
+      const res = await api.uploadVideo(formData, (progressEvt) => {
+        const percent = Math.round((progressEvt.loaded * 100) / (progressEvt.total || 1));
+        updateQueueItem(item.id, {
+          uploadProgress: Math.min(100, percent),
+          status: percent >= 100 ? 'processing' : 'uploading',
+        });
+      });
+
+      clearInterval(stageTimer);
+
+      updateQueueItem(item.id, {
+        status: 'completed',
+        uploadProgress: 100,
+        processingProgress: 100,
+        uploadedVideoId: res.id,
+        indexedEventsCount: res.indexed_events_count || (res as any).indexed_events?.length || 0,
+        thumbnailUrl: res.thumbnail_url,
+        videoUrl: res.video_url,
+      });
+
+      setLastUploadedResult(res);
+      await Promise.all([refreshVideos(), refreshEvents(), refreshCameras()]);
+      return true;
+    } catch (err: any) {
+      console.error(`Error processing ${item.videoName}:`, err);
+      let errMsg = err?.response?.data?.error || err?.message || 'Processing failed';
+      if (err?.response?.status === 413 || String(errMsg).includes('413')) {
+        errMsg = 'File size exceeds 100MB limit.';
+      }
+
+      updateQueueItem(item.id, {
+        status: 'failed',
+        errorMessage: typeof errMsg === 'string' ? errMsg : 'Processing error',
+        uploadProgress: 0,
+        processingProgress: 0,
+      });
+      return false;
+    }
+  };
+
+  // Process all waiting / failed items in parallel with concurrency
+  const handleStartProcessAll = async () => {
+    const pendingItems = queue.filter(
+      (item) => item.status === 'waiting' || item.status === 'failed'
+    );
+    if (pendingItems.length === 0) {
+      showNotification('No pending videos to process in queue.');
       return;
     }
 
-    setIsUploading(true);
-    setUploadStep(0);
-    setUploadPercent(10);
+    setIsProcessingQueue(true);
 
-    const runStep = (step: number, percent: number) => {
-      return new Promise<void>((resolve) => {
-        setTimeout(() => {
-          setUploadStep(step);
-          setUploadPercent(percent);
-          resolve();
-        }, 500);
-      });
-    };
+    // Concurrency pool (process up to activeConcurrency items simultaneously)
+    const itemsToProcess = [...pendingItems];
+    let currentIndex = 0;
 
-    try {
-      const formData = new FormData();
-      if (selectedFile) {
-        formData.append('video_file', selectedFile);
-      } else {
-        formData.append('filename', `cctv_footage_${selectedCameraId}.mp4`);
-        if (previewVideoUrl) {
-          formData.append('preset_video_url', previewVideoUrl);
+    const worker = async () => {
+      while (currentIndex < itemsToProcess.length) {
+        const item = itemsToProcess[currentIndex++];
+        if (item) {
+          await processQueueItem(item);
         }
       }
-      formData.append('camera_id', selectedCameraId);
-      formData.append('recorded_date', recordedDate);
-      formData.append('recorded_start_time', startTime);
-      formData.append('recorded_end_time', endTime);
-      if (incidentNotes) {
-        formData.append('incident_notes', incidentNotes);
-      }
+    };
 
-      // Smooth step updates while request runs
-      let stepTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
-        setUploadStep((prev) => Math.min(3, prev + 1));
-        setUploadPercent((prev) => Math.min(90, prev + 25));
-      }, 600);
+    const workers = Array.from({ length: Math.min(activeConcurrency, itemsToProcess.length) }, () =>
+      worker()
+    );
+    await Promise.all(workers);
 
-      const res = await api.uploadVideo(formData);
-      if (stepTimer) {
-        clearInterval(stepTimer);
-        stepTimer = null;
-      }
+    setIsProcessingQueue(false);
+    await Promise.all([refreshVideos(), refreshEvents(), refreshCameras()]);
+    showNotification('Completed multi-camera video queue processing.');
+  };
 
-      setUploadStep(4);
-      setUploadPercent(100);
-      setLastUploadedResult(res);
+  // Reprocess single item without re-uploading
+  const handleReprocessItem = async (item: UploadQueueItem) => {
+    if (!item.uploadedVideoId) {
+      // Re-upload from scratch
+      await processQueueItem(item);
+      return;
+    }
+
+    try {
+      updateQueueItem(item.id, {
+        status: 'processing',
+        processingProgress: 40,
+        errorMessage: undefined,
+      });
+
+      const res = await api.reprocessVideo(item.uploadedVideoId, globalIncidentNotes);
+
+      updateQueueItem(item.id, {
+        status: 'completed',
+        processingProgress: 100,
+        indexedEventsCount: res.indexed_events_count,
+        thumbnailUrl: res.video.thumbnail_url,
+      });
+
       await Promise.all([refreshVideos(), refreshEvents(), refreshCameras()]);
-
-      showNotification('Footage uploaded and indexed with AI vision! Ready to query.');
+      showNotification(`Reprocessed ${item.cameraName} (${res.indexed_events_count} events).`);
     } catch (err: any) {
-      console.error('Video upload error:', err);
-      let errMsg = err?.response?.data?.error || err?.message || 'Upload processing failed';
-      if (err?.response?.status === 413 || String(errMsg).includes('413')) {
-        errMsg = 'File size exceeds 100MB limit. Please choose a smaller video clip or select a test preset.';
-      }
-      showNotification(`Upload issue: ${typeof errMsg === 'string' ? errMsg : 'Failed to process video'}`);
-    } finally {
-      setTimeout(() => {
-        setIsUploading(false);
-        setUploadStep(0);
-        setUploadPercent(0);
-      }, 800);
+      updateQueueItem(item.id, {
+        status: 'failed',
+        errorMessage: err?.response?.data?.error || err?.message || 'Reprocessing failed',
+      });
+      showNotification('Failed to reprocess video.');
     }
   };
 
-  const handlePlayCatalogVideo = (vid: any) => {
-    const targetCam = cameras.find((c) => c.camera_id === vid.camera_id) || cameras[0];
-    setSelectedEvidence({
-      id: `cat_${vid.id}`,
-      camera_id: vid.camera_id,
-      camera_name: vid.camera_name || targetCam?.name || 'Surveillance Feed',
-      video_id: vid.id,
-      date: vid.recorded_date,
-      start_time: vid.recorded_start_time,
-      end_time: vid.recorded_end_time,
-      timestamp_offset_seconds: 0,
-      description: `Playback of recorded CCTV video file: ${vid.filename}`,
-      detected_objects: ['person', 'vehicle', 'motion'],
-      confidence: 0.95,
-      thumbnail_url: vid.thumbnail_url || targetCam?.thumbnail_url || '',
-      video_url: vid.video_url || targetCam?.video_url || '/videos/cctv_gate_night.mp4',
-      bounding_boxes: [],
-    });
-  };
+  // Metrics calculations
+  const totalQueueCount = queue.length;
+  const completedCount = queue.filter((i) => i.status === 'completed').length;
+  const failedCount = queue.filter((i) => i.status === 'failed').length;
+  const inFlightCount = queue.filter(
+    (i) => i.status === 'uploading' || i.status === 'processing' || i.status === 'indexing'
+  ).length;
+
+  const overallUploadProgress =
+    totalQueueCount === 0
+      ? 0
+      : Math.round(
+          queue.reduce((acc, item) => acc + (item.uploadProgress || 0), 0) / totalQueueCount
+        );
+
+  const overallProcessingProgress =
+    totalQueueCount === 0
+      ? 0
+      : Math.round(
+          queue.reduce((acc, item) => acc + (item.processingProgress || 0), 0) / totalQueueCount
+        );
+
+  const totalUploadedCamerasCount = cameras.filter((c) => c.is_uploaded).length;
+  const totalIndexedEventsCount = events.length;
 
   return (
     <div className="space-y-8 max-w-7xl mx-auto pb-16">
       {/* Header */}
-      <div>
-        <h1 className="text-xl font-bold text-neutral-100 tracking-tight">CCTV Video Footage Ingestion</h1>
-        <p className="text-xs text-neutral-400 mt-1">
-          Upload recorded surveillance video files to index events with FFmpeg and pgvector
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-bold text-neutral-100 tracking-tight flex items-center gap-2">
+            <span>Multi-Camera Video Upload</span>
+            <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-emerald-950 text-emerald-400 border border-emerald-800/80">
+              Parallel Ingestion
+            </span>
+          </h1>
+          <p className="text-xs text-neutral-400 mt-1">
+            Upload and process multiple CCTV video files simultaneously. Each video is indexed as an independent camera channel.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setActiveTab('camera-dashboard')}
+            className="px-3 py-2 bg-neutral-900 hover:bg-neutral-800 text-neutral-200 hover:text-white border border-neutral-700 text-xs rounded-lg transition-colors flex items-center gap-1.5"
+          >
+            <CameraIcon className="w-3.5 h-3.5 text-emerald-400" />
+            <span>View Camera Dashboard</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Top Level Metric Cards (Requirement: Show UI metrics) */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        <div className="p-3.5 rounded-lg bg-neutral-900/60 border border-neutral-800 space-y-1">
+          <span className="text-[11px] font-medium text-neutral-400">In Queue</span>
+          <div className="text-xl font-bold font-mono text-neutral-100 tabular-nums">
+            {totalQueueCount}
+          </div>
+          <span className="text-[10px] text-neutral-500">{inFlightCount} in flight</span>
+        </div>
+
+        <div className="p-3.5 rounded-lg bg-neutral-900/60 border border-neutral-800 space-y-1">
+          <span className="text-[11px] font-medium text-neutral-400">Completed</span>
+          <div className="text-xl font-bold font-mono text-emerald-400 tabular-nums">
+            {completedCount}
+          </div>
+          <span className="text-[10px] text-neutral-500">{failedCount} failed</span>
+        </div>
+
+        <div className="p-3.5 rounded-lg bg-neutral-900/60 border border-neutral-800 space-y-1">
+          <span className="text-[11px] font-medium text-neutral-400">Overall Upload</span>
+          <div className="text-xl font-bold font-mono text-sky-400 tabular-nums">
+            {overallUploadProgress}%
+          </div>
+          <div className="w-full bg-neutral-950 h-1 rounded-full overflow-hidden mt-1">
+            <div
+              className="bg-sky-500 h-full transition-all duration-300"
+              style={{ width: `${overallUploadProgress}%` }}
+            />
+          </div>
+        </div>
+
+        <div className="p-3.5 rounded-lg bg-neutral-900/60 border border-neutral-800 space-y-1">
+          <span className="text-[11px] font-medium text-neutral-400">Overall Processing</span>
+          <div className="text-xl font-bold font-mono text-emerald-400 tabular-nums">
+            {overallProcessingProgress}%
+          </div>
+          <div className="w-full bg-neutral-950 h-1 rounded-full overflow-hidden mt-1">
+            <div
+              className="bg-emerald-500 h-full transition-all duration-300"
+              style={{ width: `${overallProcessingProgress}%` }}
+            />
+          </div>
+        </div>
+
+        <div className="p-3.5 rounded-lg bg-neutral-900/60 border border-neutral-800 space-y-1">
+          <span className="text-[11px] font-medium text-neutral-400">Uploaded Cameras</span>
+          <div className="text-xl font-bold font-mono text-neutral-100 tabular-nums">
+            {totalUploadedCamerasCount || cameras.length}
+          </div>
+          <span className="text-[10px] text-neutral-500">{cameras.length} registered</span>
+        </div>
+
+        <div className="p-3.5 rounded-lg bg-neutral-900/60 border border-neutral-800 space-y-1">
+          <span className="text-[11px] font-medium text-neutral-400">Total Indexed Events</span>
+          <div className="text-xl font-bold font-mono text-emerald-400 tabular-nums">
+            {totalIndexedEventsCount}
+          </div>
+          <span className="text-[10px] text-neutral-500">Vector search ready</span>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Upload Form (2 cols) */}
+        {/* Main Left Section: Upload Dropzone + Queue (2 cols) */}
         <div className="lg:col-span-2 space-y-6">
-          {/* Quick Presets Bar */}
-          <div className="p-4 rounded-xl bg-neutral-900/60 border border-neutral-800 space-y-2">
-            <div className="text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
-              Quick Test Footage Presets (Live MP4 Streams)
+          {/* Multi-file Drag & Drop Area */}
+          <div
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={handleDrop}
+            onClick={() => fileInputRef.current?.click()}
+            className="border-2 border-dashed rounded-xl p-8 flex flex-col items-center justify-center text-center cursor-pointer transition-all border-neutral-800 bg-neutral-900/40 hover:border-emerald-600/60 hover:bg-neutral-900/70 group"
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept="video/*,.mp4,.mov,.avi,.mkv,.webm,.m4v,.ts"
+              onChange={handleFileInputChange}
+              className="hidden"
+            />
+
+            <div className="w-12 h-12 rounded-full bg-neutral-900 border border-neutral-800 group-hover:border-emerald-500/50 flex items-center justify-center text-neutral-400 group-hover:text-emerald-400 transition-colors mb-3">
+              <UploadCloud className="w-6 h-6" />
             </div>
-            <div className="flex flex-wrap gap-2 pt-1">
+
+            <h3 className="text-sm font-semibold text-neutral-200">
+              Drag & Drop Multiple CCTV Videos Here, or Click to Browse
+            </h3>
+            <p className="text-xs text-neutral-400 mt-1 max-w-md">
+              Select 1 to 10+ video files simultaneously. Supports MP4, MOV, AVI, MKV, WebM up to 100MB per file.
+            </p>
+            <div className="flex items-center gap-2 mt-4 text-[11px] text-neutral-500 font-mono">
+              <span>Automatic Camera ID assignment</span>
+              <span>·</span>
+              <span>Independent processing</span>
+            </div>
+          </div>
+
+          {/* Quick Test Presets Bar */}
+          <div className="p-4 rounded-xl bg-neutral-900/60 border border-neutral-800 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
+                Quick Test Footage Presets (4 Independent Cameras)
+              </div>
+              <button
+                type="button"
+                onClick={handleAddAllPresets}
+                className="px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200 hover:text-white text-[11px] font-medium transition-colors flex items-center gap-1 border border-neutral-700"
+              >
+                <FolderPlus className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Add All 4 Presets to Queue</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">
               {samplePresets.map((preset, idx) => (
                 <button
                   key={idx}
                   type="button"
-                  onClick={() => handleSelectPreset(preset)}
-                  className={`px-3 py-1.5 rounded-md text-xs font-medium border transition-colors ${
-                    selectedCameraId === preset.camId
-                      ? 'bg-neutral-800 text-white border-neutral-600'
-                      : 'bg-neutral-950 text-neutral-300 border-neutral-800 hover:text-white hover:border-neutral-700'
-                  }`}
+                  onClick={() => handleAddSinglePreset(preset)}
+                  className="p-2.5 rounded-lg bg-neutral-950 border border-neutral-800 hover:border-neutral-700 hover:bg-neutral-900 text-left transition-all space-y-1"
                 >
-                  {preset.name}
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-mono text-emerald-400 font-semibold">{preset.camId}</span>
+                    <span className="text-[10px] text-neutral-500 font-mono">{preset.duration}s</span>
+                  </div>
+                  <div className="text-xs font-medium text-neutral-200 truncate">{preset.name}</div>
+                  <div className="text-[10px] text-neutral-500 truncate">{preset.file}</div>
                 </button>
               ))}
             </div>
           </div>
 
-          <form onSubmit={handleStartUpload} className="space-y-6">
-            {/* Real Video Preview + Drag & Drop Box */}
-            <div className="space-y-3">
-              <div
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={handleDrop}
-                onClick={() => fileInputRef.current?.click()}
-                className={`border-2 border-dashed rounded-xl p-6 flex flex-col items-center justify-center text-center cursor-pointer transition-all ${
-                  selectedFile
-                    ? 'border-emerald-700 bg-emerald-950/20'
-                    : 'border-neutral-800 bg-neutral-900/40 hover:border-neutral-700 hover:bg-neutral-900/60'
-                }`}
-              >
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="video/*,.mp4,.mov,.avi,.mkv,.webm,.m4v,.ts"
-                  onChange={handleFileChange}
-                  className="hidden"
-                />
-
-                <div className="w-10 h-10 rounded-full bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-400 mb-2">
-                  <UploadCloud className="w-5 h-5" />
-                </div>
-
-                {selectedFile ? (
-                  <div className="space-y-0.5">
-                    <div className="text-xs font-semibold text-neutral-200">
-                      {selectedFile.name}
-                    </div>
-                    <div className="text-[11px] font-mono tabular-nums text-neutral-500">
-                      {(selectedFile.size / (1024 * 1024)).toFixed(1)} MB · Ready for processing (Max 100 MB)
-                    </div>
-                  </div>
-                ) : (
-                  <div className="space-y-0.5">
-                    <div className="text-xs font-semibold text-neutral-200">
-                      Click or drag & drop custom CCTV recording footage here
-                    </div>
-                    <div className="text-[11px] text-neutral-500">
-                      Supports MP4, MOV, MKV, AVI, WebM up to 100MB (Or choose a preset above)
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Real Video Playback Preview Card */}
-              {previewVideoUrl && (
-                <div className="rounded-xl overflow-hidden bg-black border border-neutral-800 space-y-2">
-                  <div className="relative aspect-video">
-                    <video
-                      key={previewVideoUrl}
-                      src={previewVideoUrl}
-                      controls
-                      autoPlay
-                      loop
-                      muted
-                      playsInline
-                      className="w-full h-full object-cover"
-                    />
-                    <div className="absolute top-2 left-2 flex items-center gap-1.5 bg-black/80 px-2 py-0.5 rounded text-[10px] font-mono text-neutral-200 pointer-events-none">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                      <span>SOURCE PREVIEW · {selectedCameraId}</span>
-                    </div>
-                  </div>
-                  <div className="px-4 pb-3 flex items-center justify-between text-xs text-neutral-400">
-                    <span className="font-mono text-[11px]">1080P · 30 FPS · H.264 MP4</span>
-                    <span className="text-[11px] text-emerald-400 font-medium">Ready for FFmpeg indexing</span>
-                  </div>
-                </div>
-              )}
+          {/* Global Recording Settings (Applied to Queue) */}
+          <div className="p-4 rounded-xl bg-neutral-900/60 border border-neutral-800 space-y-3">
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
+              Batch Metadata Settings (Applied to Uploaded Cameras)
             </div>
 
-            {/* Video Metadata Config Grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 p-4 rounded-xl bg-neutral-900/60 border border-neutral-800">
-              <div className="space-y-1.5">
-                <label className="text-[11px] font-medium text-neutral-400">Assigned Camera</label>
-                <select
-                  value={selectedCameraId}
-                  onChange={(e) => setSelectedCameraId(e.target.value)}
-                  className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 rounded text-xs text-neutral-200 focus:outline-none focus:border-neutral-700"
-                >
-                  {cameras.map((c) => (
-                    <option key={c.id} value={c.camera_id}>
-                      {c.camera_id} - {c.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="text-[11px] font-medium text-neutral-400">Recorded Date</label>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="space-y-1">
+                <label className="text-[11px] font-medium text-neutral-400">Recording Date</label>
                 <input
                   type="date"
-                  value={recordedDate}
-                  onChange={(e) => setRecordedDate(e.target.value)}
-                  className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 rounded text-xs text-neutral-200 font-mono focus:outline-none focus:border-neutral-700"
+                  value={globalRecordedDate}
+                  onChange={(e) => setGlobalRecordedDate(e.target.value)}
+                  className="w-full px-3 py-1.5 bg-neutral-950 border border-neutral-800 rounded text-xs text-neutral-200 font-mono focus:outline-none focus:border-neutral-700"
                 />
               </div>
 
-              <div className="space-y-1.5">
+              <div className="space-y-1">
                 <label className="text-[11px] font-medium text-neutral-400">Recording Window</label>
                 <div className="flex items-center gap-1">
                   <input
                     type="time"
                     step="1"
-                    value={startTime}
-                    onChange={(e) => setStartTime(e.target.value)}
-                    className="w-full px-2 py-2 bg-neutral-950 border border-neutral-800 rounded text-xs text-neutral-200 font-mono text-center"
+                    value={globalStartTime}
+                    onChange={(e) => setGlobalStartTime(e.target.value)}
+                    className="w-full px-2 py-1.5 bg-neutral-950 border border-neutral-800 rounded text-xs text-neutral-200 font-mono text-center"
                   />
                   <span className="text-neutral-500">-</span>
                   <input
                     type="time"
                     step="1"
-                    value={endTime}
-                    onChange={(e) => setEndTime(e.target.value)}
-                    className="w-full px-2 py-2 bg-neutral-950 border border-neutral-800 rounded text-xs text-neutral-200 font-mono text-center"
+                    value={globalEndTime}
+                    onChange={(e) => setGlobalEndTime(e.target.value)}
+                    className="w-full px-2 py-1.5 bg-neutral-950 border border-neutral-800 rounded text-xs text-neutral-200 font-mono text-center"
                   />
                 </div>
               </div>
+
+              <div className="space-y-1">
+                <label className="text-[11px] font-medium text-neutral-400">Concurrency Level</label>
+                <select
+                  value={activeConcurrency}
+                  onChange={(e) => setActiveConcurrency(Number(e.target.value))}
+                  className="w-full px-3 py-1.5 bg-neutral-950 border border-neutral-800 rounded text-xs text-neutral-200 font-mono"
+                >
+                  <option value={1}>1 Video at a time (Sequential)</option>
+                  <option value={2}>2 Videos in Parallel (Recommended)</option>
+                  <option value={3}>3 Videos in Parallel (Fast)</option>
+                </select>
+              </div>
             </div>
 
-            {/* Optional Incident & Activity Notes */}
-            <div className="p-4 rounded-xl bg-neutral-900/60 border border-neutral-800 space-y-1.5">
-              <label className="text-[11px] font-medium text-neutral-400 flex items-center justify-between">
-                <span>Observed Scene Activities (Optional Search Guidance)</span>
-                <span className="text-neutral-500 font-normal">e.g. Person with duffel bag, courier, vehicle entrance</span>
+            <div className="space-y-1 pt-1">
+              <label className="text-[11px] font-medium text-neutral-400">
+                Surveillance Activity Notes (Optional Guidance for All Videos)
               </label>
               <input
                 type="text"
-                value={incidentNotes}
-                onChange={(e) => setIncidentNotes(e.target.value)}
-                placeholder="Describe key events to index (e.g. 'Individual entered turnstile carrying black duffel bag')"
-                className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 rounded text-xs text-neutral-200 placeholder:text-neutral-500 focus:outline-none focus:border-neutral-700"
+                value={globalIncidentNotes}
+                onChange={(e) => setGlobalIncidentNotes(e.target.value)}
+                placeholder="e.g. Ingesting footage for multi-zone security inspection"
+                className="w-full px-3 py-1.5 bg-neutral-950 border border-neutral-800 rounded text-xs text-neutral-200 placeholder:text-neutral-500 focus:outline-none focus:border-neutral-700"
               />
             </div>
+          </div>
 
-            {/* Action Button */}
-            <button
-              type="submit"
-              disabled={isUploading}
-              className="w-full py-3 bg-neutral-100 hover:bg-white disabled:bg-neutral-800 disabled:text-neutral-600 text-neutral-950 font-semibold text-xs rounded-lg transition-colors flex items-center justify-center gap-2"
-            >
-              {isUploading ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-neutral-900 border-t-transparent rounded-full animate-spin" />
-                  <span>Processing Video Pipeline...</span>
-                </>
-              ) : (
-                <>
-                  <UploadCloud className="w-4 h-4" />
-                  <span>Start Video Ingestion Pipeline</span>
-                </>
-              )}
-            </button>
-          </form>
-
-          {/* Post-Upload Interactive Forensic Analysis Output */}
-          {lastUploadedResult && (
-            <div className="p-6 rounded-xl bg-neutral-900/90 border border-emerald-800/80 space-y-5 animate-in fade-in shadow-xl">
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pb-3 border-b border-neutral-800">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-full bg-emerald-950 border border-emerald-700/80 flex items-center justify-center text-emerald-400">
-                    <CheckCircle2 className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-bold text-white tracking-tight flex items-center gap-2">
-                      <span>Video Ingested & AI Vision Analysis Complete</span>
-                    </h3>
-                    <p className="text-[11px] text-neutral-400">
-                      {lastUploadedResult.filename} · {lastUploadedResult.duration_seconds}s duration · {lastUploadedResult.resolution} · {lastUploadedResult.indexed_events_count || lastUploadedResult.indexed_events?.length || 0} Keyframe Events Indexed
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-[11px] font-mono text-emerald-300 bg-emerald-950 border border-emerald-800/80 px-2.5 py-1 rounded">
-                    Channel: {lastUploadedResult.camera_id}
+          {/* Upload Queue Section (Requirement: Display Upload Queue) */}
+          <div className="space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <h2 className="text-sm font-semibold text-neutral-100 flex items-center gap-2">
+                  <span>Upload Queue</span>
+                  <span className="px-2 py-0.5 rounded-full bg-neutral-800 text-neutral-300 font-mono text-[11px]">
+                    {queue.length}
                   </span>
-                  <span className="text-[11px] font-mono text-neutral-300 bg-neutral-800 px-2 py-1 rounded">
-                    Indexed in pgvector
+                </h2>
+                {isProcessingQueue && (
+                  <span className="flex items-center gap-1.5 text-xs text-emerald-400 font-medium">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span>Processing in Parallel...</span>
                   </span>
-                </div>
+                )}
               </div>
 
-              {/* Indexed Keyframe Forensic Events Gallery */}
-              <div className="space-y-3">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-semibold text-neutral-200">
-                    AI Forensic Detections & Verified Keyframes
-                  </span>
-                  <span className="text-[11px] text-emerald-400 font-mono">
-                    High Confidence Forensic Vectors
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {(lastUploadedResult.indexed_events || []).map((evt: any, idx: number) => (
-                    <div
-                      key={evt.id || idx}
-                      className="group bg-neutral-950 rounded-lg border border-neutral-800 hover:border-emerald-600/60 p-3 flex flex-col justify-between space-y-2.5 transition-all"
-                    >
-                      <div className="space-y-2">
-                        {/* Thumbnail + Timestamp badge */}
-                        <div
-                          className="relative aspect-video rounded overflow-hidden bg-neutral-900 border border-neutral-800/80 cursor-pointer"
-                          onClick={() => setSelectedEvidence(evt)}
-                        >
-                          <img
-                            src={evt.thumbnail_url || lastUploadedResult.thumbnail_url}
-                            alt="Keyframe detection"
-                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                            onError={(e) => {
-                              // Fallback if thumb still decoding
-                              (e.target as HTMLImageElement).src = '/thumbnails/corridor_2s.jpg';
-                            }}
-                          />
-                          <div className="absolute top-1.5 left-1.5 bg-black/80 backdrop-blur-xs px-1.5 py-0.5 rounded text-[10px] font-mono text-emerald-300 flex items-center gap-1 border border-neutral-700">
-                            <Clock className="w-3 h-3 text-emerald-400" />
-                            <span>+{Number(evt.timestamp_offset_seconds || 0).toFixed(1)}s</span>
-                          </div>
-                          <div className="absolute bottom-1.5 right-1.5 bg-black/80 px-1.5 py-0.5 rounded text-[10px] font-mono text-neutral-200">
-                            {((evt.confidence || 0.95) * 100).toFixed(0)}% Conf
-                          </div>
-                        </div>
-
-                        {/* Description */}
-                        <p className="text-[11px] text-neutral-300 line-clamp-2 leading-relaxed">
-                          {evt.description}
-                        </p>
-
-                        {/* Detected Objects Tags */}
-                        <div className="flex flex-wrap gap-1">
-                          {(evt.detected_objects || []).slice(0, 4).map((obj: string, oIdx: number) => (
-                            <span
-                              key={oIdx}
-                              className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-neutral-900 border border-neutral-800 text-neutral-300"
-                            >
-                              {obj}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Action to Play */}
-                      <button
-                        type="button"
-                        onClick={() => setSelectedEvidence(evt)}
-                        className="w-full py-1.5 rounded bg-neutral-900 hover:bg-neutral-800 text-neutral-200 hover:text-white text-[11px] font-medium border border-neutral-800 transition-colors flex items-center justify-center gap-1.5"
-                      >
-                        <Play className="w-3 h-3 text-emerald-400" />
-                        <span>Play at +{Number(evt.timestamp_offset_seconds || 0).toFixed(1)}s</span>
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Instant Forensic Natural Language Query Launcher */}
-              <div className="space-y-2 pt-2 border-t border-neutral-800">
-                <p className="text-xs text-neutral-400">
-                  Ask natural language forensic questions about this uploaded video:
-                </p>
-
-                <div className="flex flex-wrap gap-2">
-                  {[
-                    `What activity was recorded in this ${lastUploadedResult.camera_id} footage?`,
-                    `Find people carrying bags in this video`,
-                    `Did anyone enter in this footage?`,
-                    `Show all vehicles or movements`,
-                  ].map((q, idx) => (
-                    <button
-                      key={idx}
-                      type="button"
-                      onClick={() => {
-                        triggerSearch(q, lastUploadedResult.camera_id);
-                        setActiveTab('search');
-                      }}
-                      className="px-3 py-1.5 rounded-md bg-neutral-950 border border-neutral-800 hover:border-emerald-700/80 hover:bg-neutral-900 text-xs text-neutral-300 hover:text-white transition-colors flex items-center gap-1.5"
-                    >
-                      <span>"{q}"</span>
-                      <ArrowRight className="w-3 h-3 text-emerald-400" />
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Bottom Action Buttons */}
-              <div className="pt-2 flex flex-wrap items-center justify-between gap-3 border-t border-neutral-800">
+              <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => {
-                    const firstEvt = lastUploadedResult.indexed_events?.[0];
-                    if (firstEvt) {
-                      setSelectedEvidence(firstEvt);
-                    } else {
-                      handlePlayCatalogVideo(lastUploadedResult);
-                    }
-                  }}
-                  className="px-4 py-2.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-100 font-semibold text-xs rounded-lg border border-neutral-700 transition-colors flex items-center gap-2"
+                  onClick={() => addMoreInputRef.current?.click()}
+                  className="px-3 py-1.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-200 hover:text-white border border-neutral-800 text-xs rounded-lg transition-colors flex items-center gap-1.5"
                 >
-                  <Play className="w-4 h-4 text-emerald-400" />
-                  <span>Open Video in Evidence Player with OSD</span>
+                  <Plus className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Add More Videos</span>
                 </button>
+                <input
+                  ref={addMoreInputRef}
+                  type="file"
+                  multiple
+                  accept="video/*,.mp4,.mov,.avi,.mkv,.webm,.m4v,.ts"
+                  onChange={handleFileInputChange}
+                  className="hidden"
+                />
+
+                {completedCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={clearCompleted}
+                    className="px-2.5 py-1.5 text-neutral-400 hover:text-white text-xs transition-colors"
+                  >
+                    Clear Completed
+                  </button>
+                )}
 
                 <button
                   type="button"
-                  onClick={() => {
-                    triggerSearch(
-                      `What activity was recorded in the uploaded footage?`,
-                      lastUploadedResult.camera_id
-                    );
-                    setActiveTab('search');
-                  }}
-                  className="px-4 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold text-xs rounded-lg transition-colors flex items-center gap-2"
+                  onClick={handleStartProcessAll}
+                  disabled={isProcessingQueue || queue.length === 0}
+                  className="px-4 py-1.5 bg-emerald-500 hover:bg-emerald-400 disabled:bg-neutral-800 disabled:text-neutral-600 text-neutral-950 font-bold text-xs rounded-lg transition-colors flex items-center gap-1.5 shadow-sm"
                 >
-                  <span>Launch Natural Language Search on This Footage</span>
-                  <ArrowRight className="w-4 h-4" />
+                  {isProcessingQueue ? (
+                    <>
+                      <div className="w-3.5 h-3.5 border-2 border-neutral-950 border-t-transparent rounded-full animate-spin" />
+                      <span>Processing ({inFlightCount} active)...</span>
+                    </>
+                  ) : (
+                    <>
+                      <UploadCloud className="w-3.5 h-3.5" />
+                      <span>Start Processing All ({queue.filter((i) => i.status !== 'completed').length})</span>
+                    </>
+                  )}
                 </button>
               </div>
             </div>
-          )}
 
-          {/* Real-time Processing Pipeline Indicator */}
-          {isUploading && (
-            <div className="p-6 rounded-xl bg-neutral-900/80 border border-neutral-800 space-y-4">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-semibold text-neutral-200">
-                  Processing Pipeline in Progress
-                </span>
-                <span className="font-mono tabular-nums text-emerald-400 font-semibold">
-                  {uploadPercent}%
-                </span>
+            {queue.length === 0 ? (
+              <div className="p-8 text-center rounded-xl bg-neutral-900/30 border border-neutral-800 text-neutral-400 space-y-2">
+                <Video className="w-8 h-8 text-neutral-600 mx-auto" />
+                <div className="text-xs font-semibold text-neutral-300">Queue is empty</div>
+                <p className="text-[11px] text-neutral-500 max-w-sm mx-auto">
+                  Drag and drop CCTV video files above, select files with the browser, or click "Add All 4 Presets" to test multi-camera ingestion.
+                </p>
               </div>
+            ) : (
+              <div className="space-y-3">
+                {queue.map((item, idx) => {
+                  const statusColors: Record<ProcessingStatus, { bg: string; text: string; border: string }> = {
+                    waiting: { bg: 'bg-neutral-800/80', text: 'text-neutral-300', border: 'border-neutral-700' },
+                    uploading: { bg: 'bg-sky-950/80', text: 'text-sky-300', border: 'border-sky-800' },
+                    processing: { bg: 'bg-amber-950/80', text: 'text-amber-300', border: 'border-amber-800' },
+                    indexing: { bg: 'bg-purple-950/80', text: 'text-purple-300', border: 'border-purple-800' },
+                    completed: { bg: 'bg-emerald-950/80', text: 'text-emerald-300', border: 'border-emerald-800' },
+                    failed: { bg: 'bg-red-950/80', text: 'text-red-300', border: 'border-red-800' },
+                  };
 
-              {/* Progress Bar */}
-              <div className="w-full h-2 bg-neutral-950 rounded-full overflow-hidden border border-neutral-800">
-                <div
-                  className="h-full bg-emerald-500 transition-all duration-300"
-                  style={{ width: `${uploadPercent}%` }}
-                />
-              </div>
+                  const currentStyle = statusColors[item.status] || statusColors.waiting;
 
-              {/* Pipeline Step List */}
-              <div className="space-y-2 pt-2">
-                {pipelineSteps.map((step, idx) => {
-                  const isDone = uploadStep > idx;
-                  const isCurrent = uploadStep === idx;
                   return (
                     <div
-                      key={idx}
-                      className={`flex items-start gap-3 p-2 rounded text-xs transition-colors ${
-                        isCurrent
-                          ? 'bg-neutral-800/80 text-white'
-                          : isDone
-                          ? 'text-neutral-400'
-                          : 'text-neutral-600'
+                      key={item.id}
+                      className={`p-4 rounded-xl border transition-all ${
+                        item.status === 'completed'
+                          ? 'bg-neutral-900/60 border-emerald-900/40'
+                          : item.status === 'failed'
+                          ? 'bg-red-950/20 border-red-900/50'
+                          : item.status === 'uploading' || item.status === 'processing' || item.status === 'indexing'
+                          ? 'bg-neutral-900/90 border-neutral-700 shadow-md'
+                          : 'bg-neutral-900/40 border-neutral-800'
                       }`}
                     >
-                      <div className="pt-0.5">
-                        {isDone ? (
-                          <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                        ) : isCurrent ? (
-                          <div className="w-4 h-4 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin" />
-                        ) : (
-                          <div className="w-4 h-4 rounded-full border border-neutral-700" />
-                        )}
+                      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                        {/* Left: Video details + Camera Assignment */}
+                        <div className="space-y-2 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-mono text-xs font-semibold px-2 py-0.5 rounded bg-neutral-950 border border-neutral-800 text-neutral-200">
+                              #{idx + 1}
+                            </span>
+
+                            {/* Camera ID (Editable) */}
+                            <div className="flex items-center gap-1">
+                              <span className="text-[10px] text-neutral-500 font-mono">ID:</span>
+                              <input
+                                type="text"
+                                value={item.cameraId}
+                                disabled={item.status === 'uploading' || item.status === 'processing' || item.status === 'indexing'}
+                                onChange={(e) => updateQueueItem(item.id, { cameraId: e.target.value.toUpperCase() })}
+                                className="w-20 px-2 py-0.5 bg-neutral-950 border border-neutral-800 rounded font-mono text-xs font-semibold text-emerald-400 focus:outline-none focus:border-neutral-600 disabled:opacity-70"
+                              />
+                            </div>
+
+                            {/* Camera Name (Editable inline before processing) */}
+                            <div className="flex items-center gap-1 flex-1 min-w-[200px]">
+                              <span className="text-[10px] text-neutral-500 font-mono">Name:</span>
+                              <input
+                                type="text"
+                                value={item.cameraName}
+                                disabled={item.status === 'uploading' || item.status === 'processing' || item.status === 'indexing'}
+                                onChange={(e) => updateQueueItem(item.id, { cameraName: e.target.value })}
+                                placeholder="Assign Camera Name (e.g. Main Gate)"
+                                className="w-full max-w-xs px-2 py-0.5 bg-neutral-950 border border-neutral-800 rounded text-xs font-medium text-neutral-100 focus:outline-none focus:border-neutral-600 disabled:opacity-70"
+                              />
+                            </div>
+
+                            {/* Status Badge */}
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-mono font-medium uppercase border ${currentStyle.bg} ${currentStyle.text} ${currentStyle.border}`}
+                            >
+                              {item.status}
+                            </span>
+                          </div>
+
+                          {/* Quick suggestions for Camera Name */}
+                          {item.status === 'waiting' && (
+                            <div className="flex items-center gap-1 flex-wrap pt-0.5">
+                              <span className="text-[10px] text-neutral-500">Quick Name:</span>
+                              {cameraNamePresets.slice(0, 4).map((presetName, pIdx) => (
+                                <button
+                                  key={pIdx}
+                                  type="button"
+                                  onClick={() => updateQueueItem(item.id, { cameraName: presetName })}
+                                  className="text-[10px] px-1.5 py-0.2 rounded bg-neutral-950 border border-neutral-800 text-neutral-400 hover:text-white hover:border-neutral-700 transition-colors"
+                                >
+                                  {presetName}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Video metadata row */}
+                          <div className="flex items-center gap-3 text-[11px] font-mono text-neutral-400">
+                            <span className="truncate max-w-[200px] text-neutral-300 font-medium">
+                              {item.videoName}
+                            </span>
+                            <span>·</span>
+                            <span>{(item.fileSize / (1024 * 1024)).toFixed(1)} MB</span>
+                            <span>·</span>
+                            <span>{item.duration.toFixed(1)}s duration</span>
+                            {item.indexedEventsCount !== undefined && (
+                              <>
+                                <span>·</span>
+                                <span className="text-emerald-400 font-semibold">
+                                  {item.indexedEventsCount} events indexed
+                                </span>
+                              </>
+                            )}
+                          </div>
+
+                          {/* Error message if failed */}
+                          {item.errorMessage && (
+                            <div className="text-[11px] text-red-400 bg-red-950/40 border border-red-900/60 rounded p-2 flex items-center gap-1.5">
+                              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                              <span>{item.errorMessage}</span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Right: Actions */}
+                        <div className="flex items-center gap-2 self-end sm:self-center">
+                          {item.status === 'waiting' && (
+                            <button
+                              type="button"
+                              onClick={() => processQueueItem(item)}
+                              disabled={isProcessingQueue}
+                              className="px-3 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 hover:text-white text-xs font-medium rounded transition-colors"
+                            >
+                              Process
+                            </button>
+                          )}
+
+                          {item.status === 'failed' && (
+                            <button
+                              type="button"
+                              onClick={() => processQueueItem(item)}
+                              className="px-3 py-1 bg-neutral-800 hover:bg-neutral-700 text-amber-300 text-xs font-medium rounded transition-colors flex items-center gap-1"
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                              <span>Retry</span>
+                            </button>
+                          )}
+
+                          {item.status === 'completed' && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleReprocessItem(item)}
+                                className="px-2.5 py-1 rounded bg-neutral-950 border border-neutral-800 hover:border-neutral-700 text-neutral-300 hover:text-white text-xs transition-colors flex items-center gap-1"
+                                title="Reprocess this video without re-uploading"
+                              >
+                                <RefreshCw className="w-3 h-3 text-emerald-400" />
+                                <span>Reprocess</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedEvidence({
+                                    id: `queue_${item.id}`,
+                                    camera_id: item.cameraId,
+                                    camera_name: item.cameraName,
+                                    video_id: item.uploadedVideoId || item.id,
+                                    date: globalRecordedDate,
+                                    start_time: globalStartTime,
+                                    end_time: globalEndTime,
+                                    timestamp_offset_seconds: 0,
+                                    description: `Playback of uploaded CCTV footage for ${item.cameraName} (${item.cameraId})`,
+                                    detected_objects: ['person', 'vehicle'],
+                                    confidence: 0.95,
+                                    thumbnail_url: item.thumbnailUrl || '/thumbnails/corridor_2s.jpg',
+                                    video_url: item.videoUrl || item.presetUrl || '/videos/cctv_gate_night.mp4',
+                                    bounding_boxes: [],
+                                  });
+                                }}
+                                className="px-3 py-1 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold text-xs rounded transition-colors flex items-center gap-1"
+                              >
+                                <Play className="w-3 h-3" />
+                                <span>Play</span>
+                              </button>
+                            </>
+                          )}
+
+                          {item.status !== 'uploading' && item.status !== 'processing' && item.status !== 'indexing' && (
+                            <button
+                              type="button"
+                              onClick={() => removeQueueItem(item.id)}
+                              className="p-1 rounded text-neutral-500 hover:text-red-400 transition-colors"
+                              title="Remove from queue"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
                       </div>
-                      <div>
-                        <div className="font-medium">{step.title}</div>
-                        <div className="text-[11px] text-neutral-500">{step.desc}</div>
-                      </div>
+
+                      {/* Progress bar per item (Requirement: Individual Upload Progress & Status) */}
+                      {(item.status === 'uploading' ||
+                        item.status === 'processing' ||
+                        item.status === 'indexing') && (
+                        <div className="space-y-1.5 pt-3 border-t border-neutral-800/80 mt-2">
+                          <div className="flex items-center justify-between text-[11px] font-mono">
+                            <span className="text-neutral-400">
+                              {item.status === 'uploading'
+                                ? 'Uploading footage...'
+                                : item.status === 'processing'
+                                ? 'Extracting frames with FFmpeg...'
+                                : 'Analyzing objects with Computer Vision...'}
+                            </span>
+                            <span className="text-emerald-400 font-semibold tabular-nums">
+                              {item.status === 'uploading'
+                                ? `${item.uploadProgress}%`
+                                : `${item.processingProgress}%`}
+                            </span>
+                          </div>
+                          <div className="w-full bg-neutral-950 h-1.5 rounded-full overflow-hidden border border-neutral-800">
+                            <div
+                              className="bg-emerald-500 h-full transition-all duration-300"
+                              style={{
+                                width: `${
+                                  item.status === 'uploading'
+                                    ? item.uploadProgress
+                                    : item.processingProgress
+                                }%`,
+                              }}
+                            />
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
+              </div>
+            )}
+          </div>
+
+          {/* Forensic Result Card from last upload */}
+          {lastUploadedResult && (
+            <div className="p-6 rounded-xl bg-neutral-900/90 border border-emerald-800/80 space-y-4 animate-in fade-in">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pb-3 border-b border-neutral-800">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-7 h-7 rounded-full bg-emerald-950 border border-emerald-700 flex items-center justify-center text-emerald-400">
+                    <CheckCircle2 className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white tracking-tight">
+                      Camera Channel Successfully Indexed
+                    </h3>
+                    <p className="text-[11px] text-neutral-400">
+                      Channel: {lastUploadedResult.camera_id} · {lastUploadedResult.camera_name || 'Assigned Camera'} · {lastUploadedResult.indexed_events_count || lastUploadedResult.indexed_events?.length || 0} Keyframe Events Generated
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerSearch(
+                        `What activity was recorded in ${lastUploadedResult.camera_id}?`,
+                        lastUploadedResult.camera_id
+                      );
+                      setActiveTab('search');
+                    }}
+                    className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold text-xs rounded transition-colors flex items-center gap-1.5"
+                  >
+                    <span>Search This Camera</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
             </div>
           )}
         </div>
 
-        {/* Uploaded Archive (1 col) */}
+        {/* Cataloged Cameras & Footage Archive (1 col) */}
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-neutral-100">Cataloged Footage Files</h2>
+            <h2 className="text-sm font-semibold text-neutral-100">All Registered Cameras</h2>
             <span className="text-xs text-neutral-500 font-mono tabular-nums">
-              {videos.length} videos
+              {cameras.length} channels
             </span>
           </div>
 
           <div className="space-y-3">
-            {videos.map((vid) => (
+            {cameras.map((cam) => (
               <div
-                key={vid.id}
-                onClick={() => handlePlayCatalogVideo(vid)}
+                key={cam.id}
+                onClick={() => {
+                  setSelectedEvidence({
+                    id: `cam_${cam.id}`,
+                    camera_id: cam.camera_id,
+                    camera_name: cam.name,
+                    video_id: 'cam_feed',
+                    date: cam.upload_date || '2026-10-08',
+                    start_time: '09:00:00',
+                    end_time: '10:00:00',
+                    timestamp_offset_seconds: 0,
+                    description: `Live video stream / recording for ${cam.name} (${cam.location})`,
+                    detected_objects: ['person', 'security'],
+                    confidence: 0.95,
+                    thumbnail_url: cam.thumbnail_url || '/thumbnails/gate_2s.jpg',
+                    video_url: cam.video_url || '/videos/cctv_gate_night.mp4',
+                    bounding_boxes: [],
+                  });
+                }}
                 className="group cursor-pointer p-3.5 rounded-lg bg-neutral-900/40 border border-neutral-800 hover:border-neutral-700 hover:bg-neutral-900/70 transition-all space-y-2"
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="space-y-0.5">
                     <div className="text-xs font-semibold text-neutral-200 truncate max-w-[180px] group-hover:text-white flex items-center gap-1.5">
                       <Play className="w-3 h-3 text-emerald-400 shrink-0" />
-                      <span>{vid.filename}</span>
+                      <span>{cam.name}</span>
                     </div>
                     <div className="text-[11px] font-mono text-neutral-400">
-                      Channel: {vid.camera_id}
+                      ID: {cam.camera_id} · {cam.location}
                     </div>
                   </div>
                   <span className="px-2 py-0.5 rounded bg-emerald-950/80 border border-emerald-800/80 text-emerald-300 text-[10px] font-mono font-medium">
-                    {vid.status}
+                    {cam.status}
                   </span>
                 </div>
 
                 <div className="flex items-center justify-between text-[11px] text-neutral-500 pt-1 border-t border-neutral-800/60 font-mono tabular-nums">
-                  <span>{vid.recorded_date}</span>
+                  <span>{cam.event_count} events indexed</span>
                   <span className="text-neutral-400 group-hover:text-neutral-200">
-                    Play Footage →
+                    Watch Stream →
                   </span>
                 </div>
               </div>
             ))}
+          </div>
+
+          <div className="pt-2">
+            <button
+              onClick={() => setActiveTab('camera-dashboard')}
+              className="w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-neutral-200 hover:text-white text-xs font-medium rounded-lg transition-colors flex items-center justify-center gap-2"
+            >
+              <CameraIcon className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Open Dedicated Camera Dashboard</span>
+            </button>
           </div>
         </div>
       </div>

@@ -59,14 +59,22 @@ export const api = {
     const res = await apiClient.get('/videos');
     return res.data;
   },
-  uploadVideo: async (formData: FormData): Promise<VideoRecord> => {
+  uploadVideo: async (
+    formData: FormData,
+    onUploadProgress?: (progressEvent: any) => void
+  ): Promise<VideoRecord> => {
     // Note: Do NOT explicitly pass 'Content-Type': 'multipart/form-data'.
     // In browser Axios, setting that header explicitly strips the multipart boundary,
     // causing multer/busboy to fail with 'Multipart: Boundary not found'.
     // Calling axios.post directly without Content-Type lets the browser set the boundary automatically.
     const res = await axios.post('/api/videos/upload', formData, {
       timeout: 180000, // 3 minutes for video processing and AI frame analysis
+      onUploadProgress,
     });
+    return res.data;
+  },
+  reprocessVideo: async (videoId: string, incidentNotes?: string): Promise<{ success: boolean; video: VideoRecord; indexed_events_count: number }> => {
+    const res = await apiClient.post('/videos/reprocess', { video_id: videoId, incident_notes: incidentNotes });
     return res.data;
   },
 
@@ -84,6 +92,7 @@ export const api = {
   searchEvents: async (params: {
     query: string;
     camera_id?: string;
+    camera_ids?: string[];
     min_confidence?: number;
     date_from?: string;
     date_to?: string;

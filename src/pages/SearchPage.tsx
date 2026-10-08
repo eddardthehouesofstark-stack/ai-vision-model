@@ -30,7 +30,7 @@ export const SearchPage: React.FC = () => {
   } = useCCTV();
 
   const [inputQuery, setInputQuery] = useState<string>(activeQuery || '');
-  const [selectedCameraFilter, setSelectedCameraFilter] = useState<string>('');
+  const [selectedCameraIds, setSelectedCameraIds] = useState<string[]>([]);
   const [scopeFilter, setScopeFilter] = useState<'all' | 'uploaded' | 'cameras'>('all');
   const [minConfidence, setMinConfidence] = useState<number>(0.55);
   const [showFilters, setShowFilters] = useState<boolean>(false);
@@ -69,15 +69,37 @@ export const SearchPage: React.FC = () => {
     'White delivery freight truck at loading dock',
   ];
 
+  const handleToggleCamera = (camId: string) => {
+    setSelectedCameraIds((prev) =>
+      prev.includes(camId) ? prev.filter((id) => id !== camId) : [...prev, camId]
+    );
+  };
+
+  const handleSelectAllCameras = () => {
+    setSelectedCameraIds([]);
+  };
+
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputQuery.trim()) return;
-    triggerSearch(inputQuery, selectedCameraFilter || undefined, minConfidence);
+    const filterParam =
+      selectedCameraIds.length === 0
+        ? undefined
+        : selectedCameraIds.length === 1
+        ? selectedCameraIds[0]
+        : selectedCameraIds;
+    triggerSearch(inputQuery, filterParam, minConfidence);
   };
 
   const handlePromptClick = (promptText: string) => {
     setInputQuery(promptText);
-    triggerSearch(promptText, selectedCameraFilter || undefined, minConfidence);
+    const filterParam =
+      selectedCameraIds.length === 0
+        ? undefined
+        : selectedCameraIds.length === 1
+        ? selectedCameraIds[0]
+        : selectedCameraIds;
+    triggerSearch(promptText, filterParam, minConfidence);
   };
 
   // Filter results by selected scope
@@ -177,11 +199,11 @@ export const SearchPage: React.FC = () => {
               type="button"
               onClick={() => setShowFilters(!showFilters)}
               className={`p-2 rounded-lg border transition-colors ${
-                showFilters || selectedCameraFilter || minConfidence !== 0.60
+                showFilters || selectedCameraIds.length > 0 || minConfidence !== 0.60
                   ? 'bg-neutral-800 text-neutral-100 border-neutral-600'
                   : 'bg-neutral-900 text-neutral-400 border-neutral-800 hover:text-neutral-200'
               }`}
-              title="Toggle Filters"
+              title="Toggle Multi-Camera Filters"
             >
               <SlidersHorizontal className="w-4 h-4" />
             </button>
@@ -225,10 +247,10 @@ export const SearchPage: React.FC = () => {
       {showFilters && (
         <div className="p-4 rounded-lg bg-neutral-900/60 border border-neutral-800 space-y-4">
           <div className="flex items-center justify-between text-xs font-semibold text-neutral-300">
-            <span>Query Filters & Spatial Constraints</span>
+            <span>Query Filters & Multi-Camera Constraints</span>
             <button
               onClick={() => {
-                setSelectedCameraFilter('');
+                setSelectedCameraIds([]);
                 setMinConfidence(0.60);
               }}
               className="text-[11px] text-neutral-400 hover:text-white flex items-center gap-1"
@@ -238,24 +260,60 @@ export const SearchPage: React.FC = () => {
             </button>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-1">
-            {/* Camera Select */}
-            <div className="space-y-1.5">
-              <label className="text-[11px] font-medium text-neutral-400">Target Camera Feed</label>
-              <select
-                value={selectedCameraFilter}
-                onChange={(e) => setSelectedCameraFilter(e.target.value)}
-                className="w-full px-3 py-1.5 bg-neutral-950 border border-neutral-800 rounded text-xs text-neutral-200 focus:outline-none focus:border-neutral-600"
+          {/* Multi-Camera Selection Chips (Requirement: search within specific camera, multiple selected cameras, or all cameras) */}
+          <div className="space-y-2 pt-1 border-b border-neutral-800/80 pb-3">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="font-medium text-neutral-400">
+                Target Cameras: {selectedCameraIds.length === 0 ? (
+                  <span className="text-emerald-400 font-semibold">All Cameras (Default)</span>
+                ) : (
+                  <span className="text-sky-300 font-semibold">{selectedCameraIds.length} Camera(s) Selected</span>
+                )}
+              </span>
+              <button
+                type="button"
+                onClick={handleSelectAllCameras}
+                className="text-xs text-neutral-400 hover:text-emerald-400 transition-colors"
               >
-                <option value="">All Camera Channels</option>
-                {cameras.map((c) => (
-                  <option key={c.id} value={c.camera_id}>
-                    {c.camera_id} - {c.name}
-                  </option>
-                ))}
-              </select>
+                Select All Cameras
+              </button>
             </div>
 
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={handleSelectAllCameras}
+                className={`px-2.5 py-1 rounded text-xs font-medium border transition-colors ${
+                  selectedCameraIds.length === 0
+                    ? 'bg-emerald-950 text-emerald-300 border-emerald-700'
+                    : 'bg-neutral-950 text-neutral-400 border-neutral-800 hover:text-neutral-200'
+                }`}
+              >
+                All Cameras
+              </button>
+
+              {cameras.map((c) => {
+                const isSelected = selectedCameraIds.includes(c.camera_id);
+                return (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onClick={() => handleToggleCamera(c.camera_id)}
+                    className={`px-2.5 py-1 rounded text-xs font-medium border transition-colors flex items-center gap-1.5 ${
+                      isSelected
+                        ? 'bg-neutral-800 text-white border-neutral-600 shadow-sm'
+                        : 'bg-neutral-950 text-neutral-400 border-neutral-800 hover:text-neutral-200'
+                    }`}
+                  >
+                    <span className="font-mono text-[10px] text-emerald-400">{c.camera_id}</span>
+                    <span>{c.name}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
             {/* Min Confidence Threshold */}
             <div className="space-y-1.5">
               <div className="flex justify-between text-[11px] font-medium text-neutral-400">

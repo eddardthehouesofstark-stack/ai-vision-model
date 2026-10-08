@@ -79,6 +79,13 @@ export const DashboardPage: React.FC = () => {
 
         <div className="flex items-center gap-3">
           <button
+            onClick={() => setActiveTab('camera-dashboard')}
+            className="px-3.5 py-2 bg-neutral-900 hover:bg-neutral-800 text-neutral-200 hover:text-white border border-neutral-700 font-medium text-xs rounded-md transition-colors flex items-center gap-2"
+          >
+            <Video className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Camera Dashboard</span>
+          </button>
+          <button
             onClick={() => setActiveTab('upload')}
             className="px-4 py-2 bg-neutral-100 hover:bg-white text-neutral-950 font-medium text-xs rounded-md transition-colors flex items-center gap-2"
           >

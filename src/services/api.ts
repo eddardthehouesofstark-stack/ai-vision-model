@@ -110,6 +110,12 @@ export const api = {
     return res.data;
   },
 
+  // Indexing status
+  getIndexingStatus: async (jobId?: string) => {
+    const res = await apiClient.get(jobId ? `/indexing-status/${jobId}` : '/indexing-status');
+    return res.data;
+  },
+
   // Search History
   getSearchHistory: async (): Promise<SearchHistoryItem[]> => {
     const res = await apiClient.get('/search/history');

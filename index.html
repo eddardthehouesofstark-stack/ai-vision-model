@@ -12,6 +12,58 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script>
+      // Suppress Vite dev HMR websocket in AI Studio preview iframe where HMR is disabled
+      (function() {
+        const NativeWebSocket = window.WebSocket;
+        if (NativeWebSocket) {
+          window.WebSocket = function(url, protocols) {
+            const isViteHmr = protocols === 'vite-hmr' || protocols === 'vite-ping' ||
+              (typeof url === 'string' && (url.includes('token=') || url.includes('@vite')));
+            if (isViteHmr) {
+              const listeners = {};
+              return {
+                readyState: 1, // OPEN
+                OPEN: 1,
+                CLOSED: 3,
+                CONNECTING: 0,
+                CLOSING: 2,
+                send: function() {},
+                close: function() {},
+                addEventListener: function(event, handler) {
+                  if (!listeners[event]) listeners[event] = [];
+                  listeners[event].push(handler);
+                },
+                removeEventListener: function(event, handler) {
+                  if (listeners[event]) listeners[event] = listeners[event].filter(function(h) { return h !== handler; });
+                },
+                dispatchEvent: function() { return true; }
+              };
+            }
+            return new NativeWebSocket(url, protocols);
+          };
+          window.WebSocket.prototype = NativeWebSocket.prototype;
+          window.WebSocket.OPEN = 1;
+          window.WebSocket.CLOSED = 3;
+          window.WebSocket.CONNECTING = 0;
+          window.WebSocket.CLOSING = 2;
+        }
+
+        window.addEventListener('unhandledrejection', function(event) {
+          if (event.reason && String(event.reason.message || event.reason).includes('WebSocket closed without opened')) {
+            event.preventDefault();
+          }
+        });
+
+        const origConsoleError = console.error;
+        console.error = function(...args) {
+          if (args[0] && typeof args[0] === 'string' && args[0].includes('[vite] failed to connect to websocket')) {
+            return;
+          }
+          origConsoleError.apply(console, args);
+        };
+      })();
+    </script>
   </head>
   <body class="bg-neutral-950 text-neutral-100 antialiased selection:bg-neutral-800 selection:text-neutral-200">
     <div id="root"></div>

@@ -21,6 +21,8 @@ export const UploadPage: React.FC = () => {
     cameras,
     videos,
     refreshVideos,
+    refreshEvents,
+    refreshCameras,
     showNotification,
     setActiveTab,
     setSelectedEvidence,
@@ -95,21 +97,21 @@ export const UploadPage: React.FC = () => {
   };
 
   const pipelineSteps = [
-    { title: 'Uploading Video Binary', desc: 'Pushing file chunks to Supabase Storage' },
-    { title: 'Demuxing Video Streams', desc: 'Container parsing & timestamp alignment' },
-    { title: 'FFmpeg Keyframe Extraction', desc: 'Extracting 1 frame per second (1 FPS)' },
-    { title: 'Vision-Language Embeddings', desc: 'Computing 512-dim visual vector features' },
-    { title: 'Supabase pgvector Indexing', desc: 'Writing vector records to PostgreSQL' },
+    { title: 'Uploading', desc: 'Saving CCTV video to secure storage' },
+    { title: 'Extracting Frames', desc: 'Demuxing video & extracting keyframes with FFmpeg' },
+    { title: 'Detecting Objects', desc: 'Computer vision analysis for person, vehicles & bags' },
+    { title: 'Saving Events', desc: 'Writing verified vector event records to database' },
+    { title: 'Completed', desc: 'Video fully indexed and ready for natural language query' },
   ];
 
-  const MAX_FILE_SIZE = 28 * 1024 * 1024; // 28MB Cloud Run payload limit
+  const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB video processing limit
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
       if (file.size > MAX_FILE_SIZE) {
         showNotification(
-          `File size (${(file.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 28MB platform limit. Please choose a clip under 28MB or select a test preset.`
+          `File size (${(file.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 100MB limit. Please choose a clip under 100MB or select a test preset.`
         );
         return;
       }
@@ -125,7 +127,7 @@ export const UploadPage: React.FC = () => {
       const file = e.dataTransfer.files[0];
       if (file.size > MAX_FILE_SIZE) {
         showNotification(
-          `File size (${(file.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 28MB platform limit. Please choose a clip under 28MB or select a test preset.`
+          `File size (${(file.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 100MB limit. Please choose a clip under 100MB or select a test preset.`
         );
         return;
       }
@@ -140,7 +142,7 @@ export const UploadPage: React.FC = () => {
 
     if (selectedFile && selectedFile.size > MAX_FILE_SIZE) {
       showNotification(
-        `File size (${(selectedFile.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 28MB limit. Please select a clip under 28MB or choose a preset.`
+        `File size (${(selectedFile.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 100MB limit. Please select a clip under 100MB or choose a preset.`
       );
       return;
     }
@@ -192,14 +194,14 @@ export const UploadPage: React.FC = () => {
       setUploadStep(4);
       setUploadPercent(100);
       setLastUploadedResult(res);
-      await refreshVideos();
+      await Promise.all([refreshVideos(), refreshEvents(), refreshCameras()]);
 
-      showNotification('Footage uploaded and indexed in pgvector! Ready to query.');
+      showNotification('Footage uploaded and indexed with AI vision! Ready to query.');
     } catch (err: any) {
       console.error('Video upload error:', err);
       let errMsg = err?.response?.data?.error || err?.message || 'Upload processing failed';
       if (err?.response?.status === 413 || String(errMsg).includes('413')) {
-        errMsg = 'File size exceeds 28MB limit for Cloud Run. Please choose a smaller video clip or select a test preset.';
+        errMsg = 'File size exceeds 100MB limit. Please choose a smaller video clip or select a test preset.';
       }
       showNotification(`Upload issue: ${typeof errMsg === 'string' ? errMsg : 'Failed to process video'}`);
     } finally {
@@ -283,7 +285,7 @@ export const UploadPage: React.FC = () => {
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept="video/mp4,video/x-matroska,video/avi,video/quicktime"
+                  accept="video/*,.mp4,.mov,.avi,.mkv,.webm,.m4v,.ts"
                   onChange={handleFileChange}
                   className="hidden"
                 />
@@ -298,7 +300,7 @@ export const UploadPage: React.FC = () => {
                       {selectedFile.name}
                     </div>
                     <div className="text-[11px] font-mono tabular-nums text-neutral-500">
-                      {(selectedFile.size / (1024 * 1024)).toFixed(1)} MB · Ready for processing (Max 28 MB)
+                      {(selectedFile.size / (1024 * 1024)).toFixed(1)} MB · Ready for processing (Max 100 MB)
                     </div>
                   </div>
                 ) : (
@@ -307,7 +309,7 @@ export const UploadPage: React.FC = () => {
                       Click or drag & drop custom CCTV recording footage here
                     </div>
                     <div className="text-[11px] text-neutral-500">
-                      Supports MP4, MKV, AVI, MOV up to 28MB (Or choose a preset above)
+                      Supports MP4, MOV, MKV, AVI, WebM up to 100MB (Or choose a preset above)
                     </div>
                   </div>
                 )}
@@ -424,57 +426,166 @@ export const UploadPage: React.FC = () => {
             </button>
           </form>
 
-          {/* Post-Upload Interactive Question Answering Launcher */}
+          {/* Post-Upload Interactive Forensic Analysis Output */}
           {lastUploadedResult && (
-            <div className="p-6 rounded-xl bg-emerald-950/30 border border-emerald-800/70 space-y-4 animate-in fade-in">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 text-xs font-semibold text-emerald-400">
-                  <CheckCircle2 className="w-4 h-4" />
-                  <span>Footage Indexed in pgvector — Ready to Answer Questions</span>
+            <div className="p-6 rounded-xl bg-neutral-900/90 border border-emerald-800/80 space-y-5 animate-in fade-in shadow-xl">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pb-3 border-b border-neutral-800">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-full bg-emerald-950 border border-emerald-700/80 flex items-center justify-center text-emerald-400">
+                    <CheckCircle2 className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white tracking-tight flex items-center gap-2">
+                      <span>Video Ingested & AI Vision Analysis Complete</span>
+                    </h3>
+                    <p className="text-[11px] text-neutral-400">
+                      {lastUploadedResult.filename} · {lastUploadedResult.duration_seconds}s duration · {lastUploadedResult.resolution} · {lastUploadedResult.indexed_events_count || lastUploadedResult.indexed_events?.length || 0} Keyframe Events Indexed
+                    </p>
+                  </div>
                 </div>
-                <span className="text-[11px] font-mono text-emerald-300 bg-emerald-900/60 px-2 py-0.5 rounded">
-                  {lastUploadedResult.camera_id} · Active
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-mono text-emerald-300 bg-emerald-950 border border-emerald-800/80 px-2.5 py-1 rounded">
+                    Channel: {lastUploadedResult.camera_id}
+                  </span>
+                  <span className="text-[11px] font-mono text-neutral-300 bg-neutral-800 px-2 py-1 rounded">
+                    Indexed in pgvector
+                  </span>
+                </div>
               </div>
 
-              <p className="text-xs text-neutral-300">
-                Your video is indexed! You can now ask questions about this footage in natural language. Click a question below:
-              </p>
+              {/* Indexed Keyframe Forensic Events Gallery */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-neutral-200">
+                    AI Forensic Detections & Verified Keyframes
+                  </span>
+                  <span className="text-[11px] text-emerald-400 font-mono">
+                    High Confidence Forensic Vectors
+                  </span>
+                </div>
 
-              {/* Instant Clickable Questions */}
-              <div className="flex flex-wrap gap-2">
-                {[
-                  `Did anyone enter in this ${lastUploadedResult.camera_id} video?`,
-                  `Find people carrying bags in this footage`,
-                  `Show all movement and vehicles`,
-                  `What activity was recorded in the uploaded footage?`,
-                ].map((q, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => {
-                      triggerSearch(q, lastUploadedResult.camera_id);
-                      setActiveTab('search');
-                    }}
-                    className="px-3 py-1.5 rounded-md bg-neutral-900 border border-emerald-800/80 hover:bg-neutral-800 text-xs text-emerald-200 hover:text-white transition-colors flex items-center gap-1.5"
-                  >
-                    <span>"{q}"</span>
-                    <ArrowRight className="w-3 h-3 text-emerald-400" />
-                  </button>
-                ))}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {(lastUploadedResult.indexed_events || []).map((evt: any, idx: number) => (
+                    <div
+                      key={evt.id || idx}
+                      className="group bg-neutral-950 rounded-lg border border-neutral-800 hover:border-emerald-600/60 p-3 flex flex-col justify-between space-y-2.5 transition-all"
+                    >
+                      <div className="space-y-2">
+                        {/* Thumbnail + Timestamp badge */}
+                        <div
+                          className="relative aspect-video rounded overflow-hidden bg-neutral-900 border border-neutral-800/80 cursor-pointer"
+                          onClick={() => setSelectedEvidence(evt)}
+                        >
+                          <img
+                            src={evt.thumbnail_url || lastUploadedResult.thumbnail_url}
+                            alt="Keyframe detection"
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                            onError={(e) => {
+                              // Fallback if thumb still decoding
+                              (e.target as HTMLImageElement).src = '/thumbnails/corridor_2s.jpg';
+                            }}
+                          />
+                          <div className="absolute top-1.5 left-1.5 bg-black/80 backdrop-blur-xs px-1.5 py-0.5 rounded text-[10px] font-mono text-emerald-300 flex items-center gap-1 border border-neutral-700">
+                            <Clock className="w-3 h-3 text-emerald-400" />
+                            <span>+{Number(evt.timestamp_offset_seconds || 0).toFixed(1)}s</span>
+                          </div>
+                          <div className="absolute bottom-1.5 right-1.5 bg-black/80 px-1.5 py-0.5 rounded text-[10px] font-mono text-neutral-200">
+                            {((evt.confidence || 0.95) * 100).toFixed(0)}% Conf
+                          </div>
+                        </div>
+
+                        {/* Description */}
+                        <p className="text-[11px] text-neutral-300 line-clamp-2 leading-relaxed">
+                          {evt.description}
+                        </p>
+
+                        {/* Detected Objects Tags */}
+                        <div className="flex flex-wrap gap-1">
+                          {(evt.detected_objects || []).slice(0, 4).map((obj: string, oIdx: number) => (
+                            <span
+                              key={oIdx}
+                              className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-neutral-900 border border-neutral-800 text-neutral-300"
+                            >
+                              {obj}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Action to Play */}
+                      <button
+                        type="button"
+                        onClick={() => setSelectedEvidence(evt)}
+                        className="w-full py-1.5 rounded bg-neutral-900 hover:bg-neutral-800 text-neutral-200 hover:text-white text-[11px] font-medium border border-neutral-800 transition-colors flex items-center justify-center gap-1.5"
+                      >
+                        <Play className="w-3 h-3 text-emerald-400" />
+                        <span>Play at +{Number(evt.timestamp_offset_seconds || 0).toFixed(1)}s</span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
               </div>
 
-              <div className="pt-2 flex justify-end">
+              {/* Instant Forensic Natural Language Query Launcher */}
+              <div className="space-y-2 pt-2 border-t border-neutral-800">
+                <p className="text-xs text-neutral-400">
+                  Ask natural language forensic questions about this uploaded video:
+                </p>
+
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    `What activity was recorded in this ${lastUploadedResult.camera_id} footage?`,
+                    `Find people carrying bags in this video`,
+                    `Did anyone enter in this footage?`,
+                    `Show all vehicles or movements`,
+                  ].map((q, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => {
+                        triggerSearch(q, lastUploadedResult.camera_id);
+                        setActiveTab('search');
+                      }}
+                      className="px-3 py-1.5 rounded-md bg-neutral-950 border border-neutral-800 hover:border-emerald-700/80 hover:bg-neutral-900 text-xs text-neutral-300 hover:text-white transition-colors flex items-center gap-1.5"
+                    >
+                      <span>"{q}"</span>
+                      <ArrowRight className="w-3 h-3 text-emerald-400" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Bottom Action Buttons */}
+              <div className="pt-2 flex flex-wrap items-center justify-between gap-3 border-t border-neutral-800">
                 <button
                   type="button"
                   onClick={() => {
-                    triggerSearch('What activity was recorded in the uploaded footage?', lastUploadedResult.camera_id);
+                    const firstEvt = lastUploadedResult.indexed_events?.[0];
+                    if (firstEvt) {
+                      setSelectedEvidence(firstEvt);
+                    } else {
+                      handlePlayCatalogVideo(lastUploadedResult);
+                    }
+                  }}
+                  className="px-4 py-2.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-100 font-semibold text-xs rounded-lg border border-neutral-700 transition-colors flex items-center gap-2"
+                >
+                  <Play className="w-4 h-4 text-emerald-400" />
+                  <span>Open Video in Evidence Player with OSD</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    triggerSearch(
+                      `What activity was recorded in the uploaded footage?`,
+                      lastUploadedResult.camera_id
+                    );
                     setActiveTab('search');
                   }}
-                  className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-semibold text-xs rounded transition-colors flex items-center gap-2"
+                  className="px-4 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold text-xs rounded-lg transition-colors flex items-center gap-2"
                 >
-                  <span>Launch Natural Language Search on This Video</span>
-                  <ArrowRight className="w-3.5 h-3.5" />
+                  <span>Launch Natural Language Search on This Footage</span>
+                  <ArrowRight className="w-4 h-4" />
                 </button>
               </div>
             </div>

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Search,
   Filter,
@@ -10,9 +10,11 @@ import {
   RotateCcw,
   Sparkles,
   Info,
+  Loader2,
 } from 'lucide-react';
 import { useCCTV } from '../context/CCTVContext';
 import { SearchResultItem } from '../types';
+import { api } from '../services/api';
 
 export const SearchPage: React.FC = () => {
   const {
@@ -32,6 +34,30 @@ export const SearchPage: React.FC = () => {
   const [scopeFilter, setScopeFilter] = useState<'all' | 'uploaded' | 'cameras'>('all');
   const [minConfidence, setMinConfidence] = useState<number>(0.55);
   const [showFilters, setShowFilters] = useState<boolean>(false);
+  const [activeIndexingJob, setActiveIndexingJob] = useState<{
+    status: string;
+    step: string;
+    progress: number;
+  } | null>(null);
+
+  useEffect(() => {
+    let timer: any = null;
+    const pollStatus = async () => {
+      try {
+        const job = await api.getIndexingStatus();
+        if (job && job.status !== 'completed' && job.status !== 'failed' && job.progress < 100) {
+          setActiveIndexingJob(job);
+        } else {
+          setActiveIndexingJob(null);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    pollStatus();
+    timer = setInterval(pollStatus, 2500);
+    return () => clearInterval(timer);
+  }, []);
 
   const examplePrompts = [
     'Did anyone enter through Gate 1 after 9 PM?',
@@ -113,6 +139,26 @@ export const SearchPage: React.FC = () => {
         </div>
       </div>
 
+      {/* Background Indexing Progress Alert */}
+      {activeIndexingJob && (
+        <div className="p-3.5 rounded-xl bg-amber-950/30 border border-amber-800/80 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-xs text-amber-200 animate-in fade-in">
+          <div className="flex items-center gap-2.5">
+            <Loader2 className="w-4 h-4 text-amber-400 animate-spin shrink-0" />
+            <div>
+              <span className="font-semibold text-white">Video Indexing Pipeline Active:</span>{' '}
+              <span className="text-amber-300 font-medium">Stage: {activeIndexingJob.step}</span>{' '}
+              <span className="text-amber-400 font-mono">({activeIndexingJob.progress}%)</span>
+              <p className="text-[11px] text-amber-300/80 mt-0.5">
+                Searching is locked while video frames are being extracted and analyzed. Will unlock automatically upon completion.
+              </p>
+            </div>
+          </div>
+          <span className="self-start sm:self-auto px-2 py-0.5 rounded bg-amber-900/60 border border-amber-700/60 text-[10px] font-mono text-amber-300">
+            PROCESSING
+          </span>
+        </div>
+      )}
+
       {/* Prominent Large Search Bar */}
       <form onSubmit={handleSearchSubmit} className="space-y-3">
         <div className="relative flex items-center">
@@ -142,7 +188,7 @@ export const SearchPage: React.FC = () => {
 
             <button
               type="submit"
-              disabled={isSearching || !inputQuery.trim()}
+              disabled={isSearching || !inputQuery.trim() || !!activeIndexingJob}
               className="px-4 py-2 bg-neutral-100 hover:bg-white disabled:bg-neutral-800 disabled:text-neutral-600 text-neutral-950 font-semibold text-xs rounded-lg transition-colors flex items-center gap-1.5"
             >
               {isSearching ? (
@@ -150,6 +196,8 @@ export const SearchPage: React.FC = () => {
                   <div className="w-3.5 h-3.5 border-2 border-neutral-900 border-t-transparent rounded-full animate-spin" />
                   <span>Searching...</span>
                 </>
+              ) : activeIndexingJob ? (
+                <span>Indexing Active...</span>
               ) : (
                 <span>Search Footage</span>
               )}

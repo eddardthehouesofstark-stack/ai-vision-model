@@ -53,8 +53,8 @@ export const CCTVPlayer: React.FC<CCTVPlayerProps> = ({
   const effectiveVideoUrl = videoUrl || getFallbackVideoUrl(cameraId, thumbnailUrl);
 
   const [isPlaying, setIsPlaying] = useState<boolean>(autoPlay);
-  const [currentVideoTime, setCurrentVideoTime] = useState<number>(0);
-  const [videoDuration, setVideoDuration] = useState<number>(12);
+  const [currentVideoTime, setCurrentVideoTime] = useState<number>(offsetSeconds || 0);
+  const [videoDuration, setVideoDuration] = useState<number>(durationSeconds || 12);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
   const [showBoundingBoxes, setShowBoundingBoxes] = useState<boolean>(true);
   const [showVectors, setShowVectors] = useState<boolean>(true);
@@ -106,10 +106,11 @@ export const CCTVPlayer: React.FC<CCTVPlayerProps> = ({
 
   // Initial video seek based on offset
   useEffect(() => {
-    if (videoRef.current && offsetSeconds > 0) {
-      // Loop within duration if offset exceeds length
-      const seekTarget = offsetSeconds % (videoDuration || 12);
+    if (videoRef.current && offsetSeconds >= 0) {
+      const dur = videoRef.current.duration || videoDuration || durationSeconds || 12;
+      const seekTarget = Math.min(offsetSeconds, Math.max(0, dur - 0.1));
       videoRef.current.currentTime = seekTarget;
+      setCurrentVideoTime(seekTarget);
     }
   }, [offsetSeconds, videoDuration]);
 
@@ -134,10 +135,12 @@ export const CCTVPlayer: React.FC<CCTVPlayerProps> = ({
 
   const handleLoadedMetadata = () => {
     if (videoRef.current) {
-      setVideoDuration(videoRef.current.duration || 12);
+      const dur = videoRef.current.duration || durationSeconds || 12;
+      setVideoDuration(dur);
       if (offsetSeconds > 0) {
-        const seek = offsetSeconds % (videoRef.current.duration || 12);
+        const seek = Math.min(offsetSeconds, Math.max(0, dur - 0.1));
         videoRef.current.currentTime = seek;
+        setCurrentVideoTime(seek);
       }
     }
   };

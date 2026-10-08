@@ -23,6 +23,7 @@ interface CCTVContextType {
   setSelectedEvidence: (item: SearchResultItem | CCTVEvent | null) => void;
   refreshCameras: () => Promise<void>;
   refreshVideos: () => Promise<void>;
+  refreshEvents: () => Promise<void>;
   refreshHistory: () => Promise<void>;
   refreshSettings: () => Promise<void>;
   activeQuery: string;
@@ -81,6 +82,15 @@ export const CCTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setVideos(data);
     } catch (err) {
       console.error('Failed to load videos', err);
+    }
+  }, []);
+
+  const refreshEvents = useCallback(async () => {
+    try {
+      const data = await api.getEvents();
+      setEvents(data);
+    } catch (err) {
+      console.error('Failed to load events', err);
     }
   }, []);
 
@@ -192,6 +202,7 @@ export const CCTVProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setSelectedEvidence,
         refreshCameras,
         refreshVideos,
+        refreshEvents,
         refreshHistory,
         refreshSettings,
         activeQuery,

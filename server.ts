@@ -5,9 +5,26 @@ import multer from 'multer';
 import fs from 'fs';
 import { execSync } from 'child_process';
 import { GoogleGenAI } from '@google/genai';
+import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+import ffprobeInstaller from '@ffprobe-installer/ffprobe';
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+
+// Resolve static or system ffmpeg/ffprobe binary paths
+let FFMPEG_BIN = 'ffmpeg';
+try {
+  if (ffmpegInstaller?.path && fs.existsSync(ffmpegInstaller.path)) {
+    FFMPEG_BIN = `"${ffmpegInstaller.path}"`;
+  }
+} catch {}
+
+let FFPROBE_BIN = 'ffprobe';
+try {
+  if (ffprobeInstaller?.path && fs.existsSync(ffprobeInstaller.path)) {
+    FFPROBE_BIN = `"${ffprobeInstaller.path}"`;
+  }
+} catch {}
 
 // Initialize Gemini AI client with telemetry headers if API key is provided
 const geminiClient = process.env.GEMINI_API_KEY
@@ -975,7 +992,7 @@ async function analyzeAndIndexUploadedVideo(
     let codecName = '';
     try {
       codecName = execSync(
-        `ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "${videoFilePath}"`,
+        `${FFPROBE_BIN} -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "${videoFilePath}"`,
         { encoding: 'utf-8', timeout: 6000 }
       ).trim().toLowerCase();
     } catch {
@@ -986,7 +1003,7 @@ async function analyzeAndIndexUploadedVideo(
     if (ext !== '.mp4' || (codecName && codecName !== 'h264')) {
       try {
         execSync(
-          `ffmpeg -i "${videoFilePath}" -c:v libx264 -preset ultrafast -crf 24 -pix_fmt yuv420p -c:a aac -b:a 128k -movflags +faststart "${webMp4Path}" -y -loglevel error`,
+          `${FFMPEG_BIN} -i "${videoFilePath}" -c:v libx264 -preset ultrafast -crf 24 -pix_fmt yuv420p -c:a aac -b:a 128k -movflags +faststart "${webMp4Path}" -y -loglevel error`,
           { timeout: 35000 }
         );
         if (fs.existsSync(webMp4Path) && fs.statSync(webMp4Path).size > 1000) {
@@ -1004,7 +1021,7 @@ async function analyzeAndIndexUploadedVideo(
   // 2. Probe video metadata with ffprobe
   try {
     const probeJson = execSync(
-      `ffprobe -v error -show_entries format=duration -of json "${playableFilePath}"`,
+      `${FFPROBE_BIN} -v error -show_entries format=duration -of json "${playableFilePath}"`,
       { encoding: 'utf-8', timeout: 6000 }
     );
     const parsed = JSON.parse(probeJson);
@@ -1055,13 +1072,13 @@ async function analyzeAndIndexUploadedVideo(
     try {
       // Primary: Fast keyframe seek
       execSync(
-        `ffmpeg -ss ${offset.toFixed(2)} -i "${playableFilePath}" -vframes 1 -q:v 2 "${thumbPath}" -y -loglevel error`,
+        `${FFMPEG_BIN} -ss ${offset.toFixed(2)} -i "${playableFilePath}" -vframes 1 -q:v 2 "${thumbPath}" -y -loglevel error`,
         { stdio: 'ignore', timeout: 8000 }
       );
       // Fallback: Accurate decoding seek if thumbnail is missing or empty
       if (!fs.existsSync(thumbPath) || fs.statSync(thumbPath).size === 0) {
         execSync(
-          `ffmpeg -i "${playableFilePath}" -ss ${offset.toFixed(2)} -vframes 1 -q:v 2 "${thumbPath}" -y -loglevel error`,
+          `${FFMPEG_BIN} -i "${playableFilePath}" -ss ${offset.toFixed(2)} -vframes 1 -q:v 2 "${thumbPath}" -y -loglevel error`,
           { stdio: 'ignore', timeout: 12000 }
         );
       }
@@ -1470,7 +1487,7 @@ app.post(
     if (diskVideoPath && fs.existsSync(diskVideoPath)) {
       try {
         const probeOut = execSync(
-          `ffprobe -v error -select_streams v:0 -show_entries stream=width,height,duration -of json "${diskVideoPath}"`,
+          `${FFPROBE_BIN} -v error -select_streams v:0 -show_entries stream=width,height,duration -of json "${diskVideoPath}"`,
           { encoding: 'utf-8', timeout: 5000 }
         );
         const probeData = JSON.parse(probeOut);
@@ -1706,7 +1723,7 @@ app.post('/api/vision/detect-frame', async (req: Request, res: Response) => {
         const tempFramePath = path.resolve(UPLOADS_DIR, `temp_frame_${Date.now()}.jpg`);
         const seek = Math.max(0, Number(current_time_seconds) || 1).toFixed(2);
         try {
-          execSync(`ffmpeg -ss ${seek} -i "${localPath}" -vframes 1 -q:v 2 "${tempFramePath}" -y`, { stdio: 'ignore' });
+          execSync(`${FFMPEG_BIN} -ss ${seek} -i "${localPath}" -vframes 1 -q:v 2 "${tempFramePath}" -y`, { stdio: 'ignore' });
           if (fs.existsSync(tempFramePath)) {
             frameBuffer = fs.readFileSync(tempFramePath);
             fs.unlinkSync(tempFramePath);

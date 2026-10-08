@@ -109,10 +109,16 @@ export const CCTVPlayer: React.FC<CCTVPlayerProps> = ({
     if (videoRef.current && offsetSeconds >= 0) {
       const dur = videoRef.current.duration || videoDuration || durationSeconds || 12;
       const seekTarget = Math.min(offsetSeconds, Math.max(0, dur - 0.1));
-      videoRef.current.currentTime = seekTarget;
+      try {
+        videoRef.current.currentTime = seekTarget;
+      } catch {}
       setCurrentVideoTime(seekTarget);
+      if (autoPlay) {
+        videoRef.current.play().catch(() => {});
+        setIsPlaying(true);
+      }
     }
-  }, [offsetSeconds, videoDuration]);
+  }, [offsetSeconds, effectiveVideoUrl]);
 
   // Compute live timestamp based on video time
   const getDisplayTimestamp = () => {

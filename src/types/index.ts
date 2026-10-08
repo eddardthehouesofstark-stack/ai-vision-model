@@ -54,6 +54,8 @@ export interface BoundingBox {
   height: number;
   vx?: number; // optional motion velocity delta X
   vy?: number; // optional motion velocity delta Y
+  similarity_score?: number;
+  is_match?: boolean;
 }
 
 export interface CCTVEvent {
@@ -135,11 +137,57 @@ export interface SystemSettings {
 export type ActiveTab =
   | 'dashboard'
   | 'search'
+  | 'image-search'
   | 'cameras'
   | 'camera-dashboard'
   | 'upload'
   | 'history'
   | 'settings';
+
+export interface ReferenceImageFeatures {
+  primary_class: string;
+  detected_objects: string[];
+  colors: string[];
+  visual_attributes: string[];
+  description: string;
+  confidence: number;
+  bounding_box: BoundingBox;
+}
+
+export interface ReferenceImageRecord {
+  id: string;
+  image_url: string;
+  mime_type: string;
+  embedding: number[];
+  embedding_dim: number;
+  visual_features: ReferenceImageFeatures;
+  created_at: string;
+}
+
+export interface ImageSearchFilters {
+  camera_id?: string;
+  camera_ids?: string[];
+  date?: string;
+  time_from?: string;
+  time_to?: string;
+  similarity_threshold?: number;
+  object_type?: string;
+}
+
+export interface ImageSearchResponse {
+  id: string;
+  reference_image_id: string;
+  reference_image_url: string;
+  visual_features: ReferenceImageFeatures;
+  filters: ImageSearchFilters;
+  total_results: number;
+  top_similarity_score: number;
+  execution_time_ms: number;
+  message: string;
+  answer_summary: string;
+  results: SearchResultItem[];
+  created_at: string;
+}
 
 export interface UploadQueueItem {
   id: string;

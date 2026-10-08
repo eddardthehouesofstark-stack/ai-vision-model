@@ -27,6 +27,7 @@ export const SearchPage: React.FC = () => {
     triggerSearch,
     isSearching,
     setSelectedEvidence,
+    setActiveTab,
   } = useCCTV();
 
   const [inputQuery, setInputQuery] = useState<string>(activeQuery || '');
@@ -123,41 +124,52 @@ export const SearchPage: React.FC = () => {
         </div>
 
         {/* Scope Selector Chips */}
-        <div className="flex items-center gap-1.5 p-1 bg-neutral-900 border border-neutral-800 rounded-lg text-xs self-start sm:self-auto">
+        <div className="flex items-center gap-2 self-start sm:self-auto flex-wrap">
           <button
             type="button"
-            onClick={() => setScopeFilter('all')}
-            className={`px-2.5 py-1 rounded font-medium transition-colors ${
-              scopeFilter === 'all'
-                ? 'bg-neutral-800 text-white shadow-sm'
-                : 'text-neutral-400 hover:text-neutral-200'
-            }`}
+            onClick={() => setActiveTab('image-search')}
+            className="px-3 py-1.5 rounded-lg font-medium text-xs bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border border-emerald-800/80 transition-colors flex items-center gap-1.5"
           >
-            All Sources
+            <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Search by Image</span>
           </button>
-          <button
-            type="button"
-            onClick={() => setScopeFilter('uploaded')}
-            className={`px-2.5 py-1 rounded font-medium transition-colors flex items-center gap-1.5 ${
-              scopeFilter === 'uploaded'
-                ? 'bg-sky-950 text-sky-200 border border-sky-800 shadow-sm'
-                : 'text-neutral-400 hover:text-neutral-200'
-            }`}
-          >
-            <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
-            <span>Uploaded Footage Only</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setScopeFilter('cameras')}
-            className={`px-2.5 py-1 rounded font-medium transition-colors ${
-              scopeFilter === 'cameras'
-                ? 'bg-neutral-800 text-white shadow-sm'
-                : 'text-neutral-400 hover:text-neutral-200'
-            }`}
-          >
-            Connected Cameras
-          </button>
+
+          <div className="flex items-center gap-1.5 p-1 bg-neutral-900 border border-neutral-800 rounded-lg text-xs">
+            <button
+              type="button"
+              onClick={() => setScopeFilter('all')}
+              className={`px-2.5 py-1 rounded font-medium transition-colors ${
+                scopeFilter === 'all'
+                  ? 'bg-neutral-800 text-white shadow-sm'
+                  : 'text-neutral-400 hover:text-neutral-200'
+              }`}
+            >
+              All Sources
+            </button>
+            <button
+              type="button"
+              onClick={() => setScopeFilter('uploaded')}
+              className={`px-2.5 py-1 rounded font-medium transition-colors flex items-center gap-1.5 ${
+                scopeFilter === 'uploaded'
+                  ? 'bg-sky-950 text-sky-200 border border-sky-800 shadow-sm'
+                  : 'text-neutral-400 hover:text-neutral-200'
+              }`}
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
+              <span>Uploaded Footage Only</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setScopeFilter('cameras')}
+              className={`px-2.5 py-1 rounded font-medium transition-colors ${
+                scopeFilter === 'cameras'
+                  ? 'bg-neutral-800 text-white shadow-sm'
+                  : 'text-neutral-400 hover:text-neutral-200'
+              }`}
+            >
+              Connected Cameras
+            </button>
+          </div>
         </div>
       </div>
 

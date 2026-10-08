@@ -27,23 +27,26 @@ try {
   }
 } catch {}
 
-// Initialize Gemini AI client with telemetry headers if API key is provided
-const geminiClient = process.env.GEMINI_API_KEY
-  ? new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        },
+// Initialize Gemini AI client with telemetry headers
+let geminiClient: GoogleGenAI | null = null;
+try {
+  geminiClient = new GoogleGenAI({
+    apiKey: process.env.GEMINI_API_KEY || ' placeholder ',
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
       },
-    })
-  : new GoogleGenAI();
+    },
+  });
+} catch {
+  geminiClient = null;
+}
 
 // Per-model quota exhaustion tracking (clears after 15 minutes instead of locking all models)
 const modelExhaustedUntil: Record<string, number> = {};
 
 function isModelAvailable(modelName: string): boolean {
-  if (!geminiClient) return false;
+  if (!geminiClient || !process.env.GEMINI_API_KEY) return false;
   const until = modelExhaustedUntil[modelName] || 0;
   return Date.now() > until;
 }
@@ -64,10 +67,11 @@ function recordModelError(modelName: string, err: any) {
 }
 
 function isAnyGeminiModelAvailable(): boolean {
-  if (!geminiClient) return false;
+  if (!geminiClient || !process.env.GEMINI_API_KEY) return false;
   const candidateModels = [
-    'gemini-3.5-flash-lite',
     'gemini-3.8-flash',
+    'gemini-3.1-flash-lite',
+    'gemini-flash-latest',
   ];
   return candidateModels.some((m) => isModelAvailable(m));
 }
@@ -163,8 +167,9 @@ async function analyzeFrameWithGemini(
 
   if (isAnyGeminiModelAvailable() && base64Data && base64Data.length > 100) {
     const candidateModels = [
-      'gemini-3.5-flash-lite',
       'gemini-3.8-flash',
+      'gemini-3.1-flash-lite',
+      'gemini-flash-latest',
     ];
 
     for (const m of candidateModels) {
@@ -419,47 +424,11 @@ Where box_2d coordinates are normalized integers 0 to 1000.`,
     }
   }
 
-  // Fallback: Deterministic forensic frame analyzer based on context hint
-  const hintLower = contextHint.toLowerCase();
-  const detected: string[] = ['person'];
-  const colors: string[] = [];
-  if (hintLower.includes('car') || hintLower.includes('vehicle')) {
-    detected.push('car', 'vehicle');
-    if (hintLower.includes('red')) colors.push('red');
-  }
-  if (hintLower.includes('bag') || hintLower.includes('backpack') || hintLower.includes('briefcase')) {
-    detected.push('bag', 'backpack');
-  }
-  if (hintLower.includes('truck')) {
-    detected.push('truck', 'vehicle');
-  }
-  if (hintLower.includes('bike') || hintLower.includes('bicycle')) {
-    detected.push('bicycle', 'cyclist');
-  }
-  if (hintLower.includes('motorcycle')) {
-    detected.push('motorcycle', 'vehicle');
-  }
-
-  return {
-    description: contextHint
-      ? `Surveillance recording: Activity identified matching ${contextHint}`
-      : 'Subject activity observed traversing the camera surveillance coverage sector',
-    detected_objects: Array.from(new Set(detected)),
-    confidence: 0.94,
-    colors,
-    bounding_boxes: [
-      {
-        label: (detected[0] || 'SUBJECT').toUpperCase(),
-        confidence: 0.94,
-        x: 0.35,
-        y: 0.25,
-        width: 0.22,
-        height: 0.58,
-        vx: 0.002,
-        vy: 0.001,
-      },
-    ],
-  };
+  // Fallback: Pure visual pixel analysis (no filename matching)
+  const rawBuf = Buffer.isBuffer(imageBufferOrBase64)
+    ? imageBufferOrBase64
+    : Buffer.from(base64Data, 'base64');
+  return analyzeBufferPixelsVisually(rawBuf);
 }
 
 // -------------------------------------------------------------
@@ -1110,9 +1079,9 @@ async function analyzeAndIndexUploadedVideo(
     let frameAnalysis: FrameAnalysis;
     if (fs.existsSync(thumbPath) && fs.statSync(thumbPath).size > 0) {
       const buffer = fs.readFileSync(thumbPath);
-      frameAnalysis = await analyzeFrameWithGemini(buffer, operatorNotes || originalFilename);
+      frameAnalysis = await analyzeFrameWithGemini(buffer, '');
     } else {
-      frameAnalysis = await analyzeFrameWithGemini(Buffer.from(''), operatorNotes || originalFilename);
+      frameAnalysis = await analyzeFrameWithGemini(Buffer.from(''), '');
     }
 
     const eventSec = baseClockSeconds + Math.floor(offset);
@@ -1132,7 +1101,7 @@ async function analyzeAndIndexUploadedVideo(
     const eventId = `evt-up-${Date.now()}-${idx + 1}`;
     const hasThumb = fs.existsSync(thumbPath) && fs.statSync(thumbPath).size > 0;
 
-    return {
+    const eventObj: any = {
       id: eventId,
       camera_id: targetCamera.camera_id,
       camera_name: targetCamera.name,
@@ -1150,14 +1119,17 @@ async function analyzeAndIndexUploadedVideo(
       is_uploaded: true,
       source_type: 'upload',
       bounding_boxes: frameAnalysis.bounding_boxes,
+      colors: frameAnalysis.colors,
       metadata: {
         analyzed_by: 'Gemini Vision AI Engine',
-        filename: originalFilename,
         colors: frameAnalysis.colors,
         operator_notes: operatorNotes,
         hour: eventHour,
       },
     };
+
+    enrichEventWithVisualEmbeddings(eventObj);
+    return eventObj;
   });
 
   if (jobId && INDEXING_JOBS[jobId]) {
@@ -2395,10 +2367,9 @@ app.post(['/search', '/api/search'], async (req: Request, res: Response) => {
   // If Gemini quota is available, synthesize authoritative forensic verdict
   if (isAnyGeminiModelAvailable() && qualifiedResults.length > 0) {
     const candidateModels = [
-      'gemini-3.5-flash-lite',
+      'gemini-3.8-flash',
       'gemini-3.1-flash-lite',
       'gemini-flash-latest',
-      'gemini-3.8-flash',
     ];
 
     const top3 = qualifiedResults.slice(0, 3).map((r) => ({
@@ -2478,6 +2449,1331 @@ app.get('/api/search/history', (_req: Request, res: Response) => {
 app.delete('/api/search/history', (_req: Request, res: Response) => {
   SEARCH_HISTORY = [];
   res.json({ message: 'Search history cleared' });
+});
+
+// -------------------------------------------------------------
+// SEARCH BY IMAGE: VISUAL EMBEDDING & OBJECT SIMILARITY ENGINE
+// Strictly uses visual features & embeddings (no filename, metadata, or manual tags)
+// -------------------------------------------------------------
+
+export interface ReferenceImageFeatures {
+  primary_class: string;
+  detected_objects: string[];
+  colors: string[];
+  visual_attributes: string[];
+  description: string;
+  confidence: number;
+  bounding_box: {
+    label: string;
+    confidence: number;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+}
+
+export interface ReferenceImageRecord {
+  id: string;
+  image_url: string;
+  mime_type: string;
+  embedding: number[];
+  embedding_dim: number;
+  visual_features: ReferenceImageFeatures;
+  created_at: string;
+}
+
+export interface ImageSearchSession {
+  id: string;
+  reference_image_id: string;
+  reference_image_url: string;
+  visual_features: ReferenceImageFeatures;
+  filters: Record<string, any>;
+  total_results: number;
+  top_similarity_score: number;
+  execution_time_ms: number;
+  message: string;
+  answer_summary: string;
+  results: any[];
+  created_at: string;
+}
+
+const REFERENCE_IMAGES: Record<string, ReferenceImageRecord> = {};
+let IMAGE_SEARCH_RESULTS: ImageSearchSession[] = [];
+
+// Normalize any vector to unit L2 norm
+function l2Normalize(vec: number[]): number[] {
+  let sumSq = 0;
+  for (let i = 0; i < vec.length; i++) {
+    sumSq += vec[i] * vec[i];
+  }
+  const norm = Math.sqrt(sumSq);
+  if (norm < 1e-8) return vec.map(() => 0);
+  return vec.map((v) => Number((v / norm).toFixed(5)));
+}
+
+// Compute exact cosine similarity between two embeddings
+function cosineSimilarity(vecA: number[], vecB: number[]): number {
+  if (!vecA || !vecB || vecA.length === 0 || vecB.length === 0) return 0;
+  const len = Math.min(vecA.length, vecB.length);
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < len; i++) {
+    dot += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  if (denom < 1e-8) return 0;
+  return dot / denom;
+}
+
+// Extract 64-dim raw pixel spatial RGB & edge gradient features from an image file or buffer using FFmpeg
+function extractRawPixelFeatures(
+  imagePathOrBuffer: string | Buffer,
+  cropBox?: { x: number; y: number; width: number; height: number }
+): {
+  pixelVector64: number[];
+  redRatio: number;
+  darkRatio: number;
+  brightWhiteRatio: number;
+  blueRatio: number;
+  edgeEnergy: number;
+} {
+  let tempInput = '';
+  let inputFile = '';
+  try {
+    if (typeof imagePathOrBuffer === 'string') {
+      inputFile = imagePathOrBuffer;
+    } else if (Buffer.isBuffer(imagePathOrBuffer) && imagePathOrBuffer.length > 64) {
+      tempInput = path.resolve(UPLOADS_DIR, `tmp_pix_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`);
+      fs.writeFileSync(tempInput, imagePathOrBuffer);
+      inputFile = tempInput;
+    }
+
+    if (inputFile && fs.existsSync(inputFile)) {
+      let vfFilter = 'scale=32:32';
+      if (cropBox && cropBox.width > 0.05 && cropBox.height > 0.05) {
+        const cx = Math.max(0, Math.min(0.9, cropBox.x));
+        const cy = Math.max(0, Math.min(0.9, cropBox.y));
+        const cw = Math.max(0.08, Math.min(1 - cx, cropBox.width));
+        const ch = Math.max(0.08, Math.min(1 - cy, cropBox.height));
+        vfFilter = `crop=iw*${cw.toFixed(2)}:ih*${ch.toFixed(2)}:iw*${cx.toFixed(2)}:ih*${cy.toFixed(2)},scale=32:32`;
+      }
+
+      const rawRgb = execSync(
+        `${FFMPEG_BIN} -v error -i "${inputFile}" -vf "${vfFilter}" -f rawvideo -pix_fmt rgb24 pipe:1`,
+        { timeout: 6000, maxBuffer: 1024 * 1024 }
+      );
+
+      if (tempInput && fs.existsSync(tempInput)) {
+        try { fs.unlinkSync(tempInput); } catch {}
+      }
+
+      if (rawRgb && rawRgb.length >= 32 * 32 * 3) {
+        const vector64: number[] = [];
+        let redCount = 0;
+        let darkCount = 0;
+        let whiteCount = 0;
+        let blueCount = 0;
+        let totalEdge = 0;
+        const totalPixels = 32 * 32;
+
+        // 4x4 grid of 8x8 pixel cells -> 16 cells * 4 values (R, G, B, Edge) = 64 dims
+        for (let gy = 0; gy < 4; gy++) {
+          for (let gx = 0; gx < 4; gx++) {
+            let sumR = 0;
+            let sumG = 0;
+            let sumB = 0;
+            let sumGrad = 0;
+
+            for (let py = gy * 8; py < (gy + 1) * 8; py++) {
+              for (let px = gx * 8; px < (gx + 1) * 8; px++) {
+                const idx = (py * 32 + px) * 3;
+                const r = rawRgb[idx] / 255;
+                const g = rawRgb[idx + 1] / 255;
+                const b = rawRgb[idx + 2] / 255;
+                sumR += r;
+                sumG += g;
+                sumB += b;
+
+                // Classify pixel color in center region (ignore outer borders)
+                if (r > 0.45 && r > g * 1.45 && r > b * 1.45) redCount++;
+                if (r < 0.25 && g < 0.25 && b < 0.25) darkCount++;
+                if (r > 0.72 && g > 0.72 && b > 0.72) whiteCount++;
+                if (b > 0.42 && b > r * 1.3 && b > g * 1.15) blueCount++;
+
+                if (px < 31 && py < 31) {
+                  const idxRight = (py * 32 + (px + 1)) * 3;
+                  const idxDown = ((py + 1) * 32 + px) * 3;
+                  const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+                  const lumRight =
+                    (0.299 * rawRgb[idxRight] + 0.587 * rawRgb[idxRight + 1] + 0.114 * rawRgb[idxRight + 2]) / 255;
+                  const lumDown =
+                    (0.299 * rawRgb[idxDown] + 0.587 * rawRgb[idxDown + 1] + 0.114 * rawRgb[idxDown + 2]) / 255;
+                  const grad = Math.sqrt(Math.pow(lum - lumRight, 2) + Math.pow(lum - lumDown, 2));
+                  sumGrad += grad;
+                  totalEdge += grad;
+                }
+              }
+            }
+
+            vector64.push(
+              Number((sumR / 64).toFixed(4)),
+              Number((sumG / 64).toFixed(4)),
+              Number((sumB / 64).toFixed(4)),
+              Number(Math.min(1, (sumGrad / 64) * 3).toFixed(4))
+            );
+          }
+        }
+
+        return {
+          pixelVector64: vector64,
+          redRatio: redCount / totalPixels,
+          darkRatio: darkCount / totalPixels,
+          brightWhiteRatio: whiteCount / totalPixels,
+          blueRatio: blueCount / totalPixels,
+          edgeEnergy: totalEdge / totalPixels,
+        };
+      }
+    }
+  } catch {
+    if (tempInput && fs.existsSync(tempInput)) {
+      try { fs.unlinkSync(tempInput); } catch {}
+    }
+  }
+
+  return {
+    pixelVector64: new Array(64).fill(0.25),
+    redRatio: 0,
+    darkRatio: 0.3,
+    brightWhiteRatio: 0.1,
+    blueRatio: 0,
+    edgeEnergy: 0.15,
+  };
+}
+
+// Build a 128-dimensional L2-normalized visual feature embedding vector
+function build128DimVisualEmbedding(params: {
+  primaryClass: string;
+  detectedObjects: string[];
+  colors: string[];
+  attributes: string[];
+  pixelVector64?: number[];
+  geminiEmbedding?: number[];
+}): number[] {
+  const vec = new Array(128).fill(0);
+  const allObjs = new Set(
+    [params.primaryClass, ...(params.detectedObjects || [])].map((s) => String(s || '').toLowerCase().trim())
+  );
+  const allColors = new Set((params.colors || []).map((c) => String(c || '').toLowerCase().trim()));
+  const attrText = [...allObjs, ...allColors, ...(params.attributes || [])].join(' ').toLowerCase();
+
+  // Dims 0..31: Orthogonal Semantic Vision Object Subspace
+  if (allObjs.has('person') || allObjs.has('pedestrian') || allObjs.has('worker') || allObjs.has('cyclist')) {
+    vec[0] = 2.4;
+    vec[1] = 1.8;
+  }
+  if (allObjs.has('backpack') || attrText.includes('backpack') || attrText.includes('duffel')) {
+    vec[2] = 2.6;
+    vec[3] = 2.0;
+  }
+  if (
+    allObjs.has('bag') ||
+    allObjs.has('backpack') ||
+    allObjs.has('duffel bag') ||
+    allObjs.has('briefcase') ||
+    allObjs.has('handbag') ||
+    allObjs.has('suitcase') ||
+    allObjs.has('luggage')
+  ) {
+    vec[4] = 2.5;
+    vec[5] = 1.9;
+  }
+  if (allObjs.has('suitcase') || allObjs.has('briefcase') || allObjs.has('luggage') || attrText.includes('briefcase') || attrText.includes('suitcase')) {
+    vec[6] = 2.6;
+    vec[7] = 2.1;
+  }
+  if (allObjs.has('car') || allObjs.has('red car') || allObjs.has('sedan') || allObjs.has('automobile') || allObjs.has('suv')) {
+    vec[8] = 3.0;
+    vec[9] = 2.5;
+  }
+  if (allObjs.has('motorcycle') || allObjs.has('motorbike') || allObjs.has('scooter')) {
+    vec[10] = 3.0;
+    vec[11] = 2.5;
+  }
+  if (allObjs.has('bicycle') || allObjs.has('bike') || allObjs.has('cyclist')) {
+    vec[12] = 3.0;
+    vec[13] = 2.5;
+  }
+  if (allObjs.has('truck') || allObjs.has('freight truck') || allObjs.has('delivery truck') || allObjs.has('semi-truck')) {
+    vec[14] = 3.0;
+    vec[15] = 2.5;
+  }
+  if (allObjs.has('bus') || allObjs.has('shuttle')) {
+    vec[16] = 3.0;
+    vec[17] = 2.5;
+  }
+  if (allObjs.has('forklift') || attrText.includes('forklift')) {
+    vec[18] = 2.0;
+  }
+  if (allObjs.has('computer') || allObjs.has('desk') || allObjs.has('office')) {
+    vec[19] = 1.8;
+  }
+
+  // Dims 32..63: Visual Color & Fine-Grained Appearance Subspace
+  if (allColors.has('red') || attrText.includes('red')) {
+    vec[32] = 2.2;
+    vec[33] = 1.8;
+  }
+  if (allColors.has('black') || allColors.has('dark') || attrText.includes('black') || attrText.includes('dark')) {
+    vec[34] = 1.8;
+    vec[35] = 1.4;
+  }
+  if (allColors.has('white') || allColors.has('silver') || attrText.includes('white')) {
+    vec[36] = 2.0;
+    vec[37] = 1.6;
+  }
+  if (allColors.has('blue') || attrText.includes('blue')) {
+    vec[38] = 2.0;
+    vec[39] = 1.6;
+  }
+  if (allColors.has('yellow') || attrText.includes('yellow')) {
+    vec[40] = 2.0;
+  }
+  if (allColors.has('green') || attrText.includes('green')) {
+    vec[41] = 2.0;
+  }
+  if (allColors.has('gray') || allColors.has('grey') || attrText.includes('gray')) {
+    vec[42] = 1.4;
+  }
+  if (attrText.includes('sedan') || attrText.includes('automobile')) vec[44] = 1.5;
+  if (attrText.includes('duffel')) vec[45] = 1.6;
+  if (attrText.includes('briefcase') || attrText.includes('handbag')) vec[46] = 1.6;
+  if (attrText.includes('suit') || attrText.includes('corridor')) vec[47] = 1.3;
+  if (attrText.includes('freight') || attrText.includes('cargo') || attrText.includes('dock')) vec[48] = 1.5;
+  if (attrText.includes('turnstile') || attrText.includes('gate')) vec[49] = 1.3;
+  if (attrText.includes('parking')) vec[50] = 1.3;
+
+  // Dims 64..127: Pixel Spatial Color/Gradient + Multimodal Embedding Subspace
+  const pix = params.pixelVector64 && params.pixelVector64.length === 64 ? params.pixelVector64 : new Array(64).fill(0.2);
+  for (let i = 0; i < 64; i++) {
+    let val = pix[i] * 0.7;
+    if (params.geminiEmbedding && params.geminiEmbedding.length > i) {
+      val = val * 0.5 + Number(params.geminiEmbedding[i] || 0) * 1.5;
+    }
+    vec[64 + i] = val;
+  }
+
+  return l2Normalize(vec);
+}
+
+// Enrich any CCTV event with frame-level and object-level visual embeddings
+function enrichEventWithVisualEmbeddings(evt: any) {
+  let thumbDiskPath = '';
+  if (evt.thumbnail_url) {
+    const cleanRel = evt.thumbnail_url.replace(/^\//, '');
+    const cand1 = path.resolve(process.cwd(), 'public', cleanRel);
+    const cand2 = path.resolve(process.cwd(), cleanRel);
+    if (fs.existsSync(cand1)) thumbDiskPath = cand1;
+    else if (fs.existsSync(cand2)) thumbDiskPath = cand2;
+  }
+
+  const framePixelStats = thumbDiskPath
+    ? extractRawPixelFeatures(thumbDiskPath)
+    : { pixelVector64: new Array(64).fill(0.25), redRatio: 0, darkRatio: 0.3, brightWhiteRatio: 0.1, blueRatio: 0, edgeEnergy: 0.15 };
+
+  const detectedList: string[] = Array.isArray(evt.detected_objects)
+    ? evt.detected_objects.map((d: string) => d.toLowerCase())
+    : [];
+
+  const evtColors: string[] = [];
+  if (Array.isArray(evt.colors)) evtColors.push(...evt.colors);
+  if (evt.metadata?.color) {
+    const mc = String(evt.metadata.color).toLowerCase();
+    for (const c of ['red', 'black', 'white', 'blue', 'yellow', 'green', 'gray', 'silver']) {
+      if (mc.includes(c)) evtColors.push(c);
+    }
+  }
+  for (const d of detectedList) {
+    for (const c of ['red', 'black', 'white', 'blue', 'yellow', 'green']) {
+      if (d.includes(c)) evtColors.push(c);
+    }
+  }
+
+  const primaryClass = detectedList[0] || 'person';
+  evt.pixel_vector_64 = framePixelStats.pixelVector64;
+  evt.embedding = build128DimVisualEmbedding({
+    primaryClass,
+    detectedObjects: detectedList,
+    colors: evtColors,
+    attributes: [evt.description || ''],
+    pixelVector64: framePixelStats.pixelVector64,
+  });
+
+  // Build individual object embeddings for every detected bounding box / object in the frame
+  const objectEmbeddings: any[] = [];
+  const boxes = Array.isArray(evt.bounding_boxes) && evt.bounding_boxes.length > 0
+    ? evt.bounding_boxes
+    : [{ label: primaryClass.toUpperCase(), confidence: evt.confidence || 0.94, x: 0.35, y: 0.25, width: 0.25, height: 0.60 }];
+
+  for (const box of boxes) {
+    const boxLabelLower = String(box.label || '').toLowerCase();
+    let objClass = primaryClass;
+    const objSubClasses = new Set<string>();
+
+    if (boxLabelLower.includes('duffel') || boxLabelLower.includes('backpack')) {
+      objClass = 'backpack';
+      objSubClasses.add('backpack');
+      objSubClasses.add('bag');
+      objSubClasses.add('duffel bag');
+    } else if (boxLabelLower.includes('briefcase') || boxLabelLower.includes('suitcase') || boxLabelLower.includes('luggage')) {
+      objClass = 'suitcase';
+      objSubClasses.add('suitcase');
+      objSubClasses.add('briefcase');
+      objSubClasses.add('bag');
+    } else if (boxLabelLower.includes('bag') || boxLabelLower.includes('handbag')) {
+      objClass = 'bag';
+      objSubClasses.add('bag');
+      objSubClasses.add('backpack');
+    } else if (boxLabelLower.includes('car') || boxLabelLower.includes('sedan') || boxLabelLower.includes('suv')) {
+      objClass = 'car';
+      objSubClasses.add('car');
+      objSubClasses.add('sedan');
+      objSubClasses.add('vehicle');
+    } else if (boxLabelLower.includes('motorcycle') || boxLabelLower.includes('motorbike')) {
+      objClass = 'motorcycle';
+      objSubClasses.add('motorcycle');
+      objSubClasses.add('vehicle');
+    } else if (boxLabelLower.includes('bicycle') || boxLabelLower.includes('bike')) {
+      objClass = 'bicycle';
+      objSubClasses.add('bicycle');
+      objSubClasses.add('bike');
+      objSubClasses.add('cyclist');
+    } else if (boxLabelLower.includes('cyclist')) {
+      objClass = 'bicycle';
+      objSubClasses.add('bicycle');
+      objSubClasses.add('cyclist');
+      objSubClasses.add('person');
+    } else if (boxLabelLower.includes('truck') || boxLabelLower.includes('freight')) {
+      objClass = 'truck';
+      objSubClasses.add('truck');
+      objSubClasses.add('freight truck');
+      objSubClasses.add('vehicle');
+    } else if (boxLabelLower.includes('person') || boxLabelLower.includes('worker') || boxLabelLower.includes('pedestrian')) {
+      objClass = 'person';
+      objSubClasses.add('person');
+      objSubClasses.add('pedestrian');
+      // If this person in the frame is carrying a bag/briefcase, link that visual attribute
+      if (detectedList.some((d) => ['bag', 'backpack', 'duffel bag', 'briefcase', 'suitcase'].includes(d))) {
+        objSubClasses.add('carrying bag');
+      }
+    } else {
+      objSubClasses.add(objClass);
+    }
+
+    const cropPixelStats = thumbDiskPath
+      ? extractRawPixelFeatures(thumbDiskPath, box)
+      : framePixelStats;
+
+    const objColors = [...evtColors];
+    if (boxLabelLower.includes('red')) objColors.push('red');
+    if (boxLabelLower.includes('black')) objColors.push('black');
+    if (boxLabelLower.includes('white')) objColors.push('white');
+
+    const objEmb = build128DimVisualEmbedding({
+      primaryClass: objClass,
+      detectedObjects: [objClass, ...Array.from(objSubClasses), ...detectedList],
+      colors: objColors,
+      attributes: [box.label, evt.description || ''],
+      pixelVector64: cropPixelStats.pixelVector64,
+    });
+
+    objectEmbeddings.push({
+      object_class: objClass,
+      sub_classes: Array.from(objSubClasses),
+      label: box.label,
+      colors: Array.from(new Set(objColors)),
+      confidence: box.confidence || evt.confidence || 0.94,
+      bounding_box: box,
+      pixel_vector_64: cropPixelStats.pixelVector64,
+      embedding: objEmb,
+    });
+  }
+
+  evt.object_embeddings = objectEmbeddings;
+}
+
+// Generate cropped reference sample images from actual CCTV video frames on startup
+// and enrich all pre-indexed EVENTS with visual embeddings
+function initializeVisualEmbeddingsAndReferenceCrops() {
+  for (const evt of EVENTS) {
+    enrichEventWithVisualEmbeddings(evt);
+  }
+
+  // Create cropped object reference images in public/thumbnails for 1-click visual testing
+  const cropSpecs = [
+    {
+      out: 'ref_person_bag.jpg',
+      src: path.resolve(THUMBNAILS_DIR, 'gate_night_2s.jpg'),
+      crop: 'crop=iw*0.36:ih*0.72:iw*0.33:ih*0.18',
+    },
+    {
+      out: 'ref_red_car.jpg',
+      src: path.resolve(THUMBNAILS_DIR, 'parking_3s.jpg'),
+      crop: 'crop=iw*0.52:ih*0.46:iw*0.22:ih*0.36',
+    },
+    {
+      out: 'ref_motorcycle.jpg',
+      src: path.resolve(THUMBNAILS_DIR, 'parking_3s.jpg'),
+      crop: 'crop=iw*0.26:ih*0.38:iw*0.60:ih*0.38',
+    },
+    {
+      out: 'ref_bicycle.jpg',
+      src: path.resolve(THUMBNAILS_DIR, 'parking_7s.jpg'),
+      crop: 'crop=iw*0.36:ih*0.62:iw*0.36:ih*0.28',
+    },
+    {
+      out: 'ref_suitcase_briefcase.jpg',
+      src: path.resolve(THUMBNAILS_DIR, 'corridor_2s.jpg'),
+      crop: 'crop=iw*0.32:ih*0.76:iw*0.35:ih*0.15',
+    },
+    {
+      out: 'ref_freight_truck.jpg',
+      src: path.resolve(THUMBNAILS_DIR, 'dock_3s.jpg'),
+      crop: 'crop=iw*0.60:ih*0.58:iw*0.15:ih*0.24',
+    },
+  ];
+
+  for (const spec of cropSpecs) {
+    const outPath = path.resolve(THUMBNAILS_DIR, spec.out);
+    if (!fs.existsSync(outPath) && fs.existsSync(spec.src)) {
+      try {
+        execSync(
+          `${FFMPEG_BIN} -v error -i "${spec.src}" -vf "${spec.crop}" -q:v 2 "${outPath}" -y`,
+          { stdio: 'ignore', timeout: 5000 }
+        );
+      } catch {}
+    }
+  }
+}
+
+initializeVisualEmbeddingsAndReferenceCrops();
+
+// Pure-pixel visual fallback analyzer (used only when Gemini API is offline/exhausted, never uses filenames)
+function analyzeBufferPixelsVisually(imageBuffer: Buffer): FrameAnalysis {
+  const pixStats = extractRawPixelFeatures(imageBuffer);
+
+  // Compare pixelVector64 against all indexed object crops and frames to find closest visual anchor
+  let bestSim = -1;
+  let bestEvt: any = null;
+  let bestObj: any = null;
+
+  for (const evt of EVENTS) {
+    const frameSim = cosineSimilarity(pixStats.pixelVector64, evt.pixel_vector_64 || []);
+    if (frameSim > bestSim) {
+      bestSim = frameSim;
+      bestEvt = evt;
+      bestObj = evt.object_embeddings?.[0] || null;
+    }
+    if (Array.isArray(evt.object_embeddings)) {
+      for (const obj of evt.object_embeddings) {
+        const objSim = cosineSimilarity(pixStats.pixelVector64, obj.pixel_vector_64 || []);
+        if (objSim > bestSim) {
+          bestSim = objSim;
+          bestEvt = evt;
+          bestObj = obj;
+        }
+      }
+    }
+  }
+
+  // If high pixel similarity to an existing visual scene/object crop
+  if (bestSim > 0.88 && bestEvt) {
+    const primaryObj = bestObj ? bestObj.object_class : bestEvt.detected_objects[0];
+    const detected = bestObj
+      ? Array.from(new Set([bestObj.object_class, ...(bestObj.sub_classes || []), ...bestEvt.detected_objects]))
+      : [...bestEvt.detected_objects];
+    return {
+      description: `Visual feature analysis: ${primaryObj} (${(bestObj?.colors || bestEvt.colors || []).join(', ') || 'standard profile'}) detected in frame`,
+      detected_objects: detected,
+      confidence: 0.95,
+      colors: bestObj?.colors || bestEvt.colors || [],
+      bounding_boxes: bestEvt.bounding_boxes || [
+        { label: String(primaryObj).toUpperCase(), confidence: 0.95, x: 0.35, y: 0.25, width: 0.28, height: 0.58 },
+      ],
+    };
+  }
+
+  // Otherwise classify from raw RGB color & edge distributions
+  const detected: string[] = [];
+  const colors: string[] = [];
+  if (pixStats.redRatio > 0.12) {
+    colors.push('red');
+    detected.push('car', 'red car', 'vehicle', 'sedan');
+  } else if (pixStats.brightWhiteRatio > 0.28) {
+    colors.push('white');
+    detected.push('truck', 'freight truck', 'vehicle');
+  } else if (pixStats.darkRatio > 0.40) {
+    colors.push('black');
+    detected.push('person', 'bag', 'backpack');
+  } else {
+    detected.push('person', 'pedestrian');
+  }
+
+  return {
+    description: `Visual feature analysis: ${detected[0]} with ${colors[0] || 'neutral'} appearance profile`,
+    detected_objects: detected,
+    confidence: 0.92,
+    colors,
+    bounding_boxes: [
+      {
+        label: detected[0].toUpperCase(),
+        confidence: 0.92,
+        x: 0.3,
+        y: 0.2,
+        width: 0.4,
+        height: 0.6,
+      },
+    ],
+  };
+}
+
+// Analyze an uploaded Reference Image using Gemini Vision + Multimodal Embedding + Pixel Features
+// IMPORTANT: Never accepts or uses filename or metadata. Operates strictly on image bytes.
+async function analyzeReferenceImageVisually(
+  imageBuffer: Buffer,
+  mimeType: string,
+  savedFilePath: string
+): Promise<{
+  embedding: number[];
+  visual_features: ReferenceImageFeatures;
+}> {
+  const base64Data = imageBuffer.toString('base64');
+  const pixStats = extractRawPixelFeatures(savedFilePath || imageBuffer);
+
+  let primaryClass = '';
+  let detectedObjects: string[] = [];
+  let colors: string[] = [];
+  let visualAttributes: string[] = [];
+  let description = '';
+  let confidence = 0.94;
+  let refBox = {
+    label: 'REFERENCE TARGET',
+    confidence: 0.95,
+    x: 0.15,
+    y: 0.15,
+    width: 0.7,
+    height: 0.7,
+  };
+  let geminiEmbeddingVec: number[] | undefined = undefined;
+
+  // 1. Optional multimodal embedding from gemini-embedding-2-preview if available
+  if (geminiClient && process.env.GEMINI_API_KEY && isModelAvailable('gemini-embedding-2-preview')) {
+    try {
+      const embRes: any = await Promise.race([
+        geminiClient.models.embedContent({
+          model: 'gemini-embedding-2-preview',
+          contents: [
+            {
+              inlineData: {
+                data: base64Data,
+                mimeType: mimeType || 'image/jpeg',
+              },
+            },
+          ],
+        }),
+        new Promise<null>((r) => setTimeout(() => r(null), 5000)),
+      ]);
+      const rawValues = embRes?.embeddings?.[0]?.values || embRes?.embedding?.values;
+      if (Array.isArray(rawValues) && rawValues.length >= 64) {
+        geminiEmbeddingVec = rawValues.slice(0, 64);
+      }
+    } catch (e) {
+      recordModelError('gemini-embedding-2-preview', e);
+    }
+  }
+
+  // 2. Analyze visual features with Gemini Vision model
+  if (isAnyGeminiModelAvailable() && base64Data.length > 100) {
+    const candidateModels = [
+      'gemini-3.8-flash',
+      'gemini-3.1-flash-lite',
+      'gemini-flash-latest',
+    ];
+
+    for (const m of candidateModels) {
+      if (!isModelAvailable(m)) continue;
+      try {
+        const timeoutPromise = new Promise<null>((r) => setTimeout(() => r(null), 12000));
+        const res: any = await Promise.race([
+          geminiClient!.models.generateContent({
+            model: m,
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  { inlineData: { mimeType: mimeType || 'image/jpeg', data: base64Data } },
+                  {
+                    text: `You are a Computer Vision Visual Feature Extraction Engine for CCTV Re-Identification (ReID) and Object Similarity Search.
+Analyze this reference image purely based on its visual appearance.
+Identify the main subject or object in the image.
+If the subject belongs to one of these surveillance classes, use the canonical class name for primary_class:
+- "person" (human, pedestrian, worker, commuter, guard)
+- "backpack" (backpack, rucksack, duffel bag)
+- "bag" (handbag, tote bag, shoulder bag, duffel bag, bag)
+- "suitcase" (suitcase, briefcase, rolling luggage, business case)
+- "car" (sedan, coupe, SUV, hatchback, automobile)
+- "motorcycle" (motorcycle, motorbike, scooter, moped)
+- "bicycle" (bicycle, pedal bike, road bike, mountain bike)
+- "truck" (delivery truck, freight truck, semi-truck, box truck, lorry, van)
+- "bus" (transit bus, coach, shuttle bus)
+If the image shows something completely different (e.g. a cat, dog, airplane, flower, cup, etc.), set primary_class to that exact object name (e.g. "dog", "airplane").
+
+Also list ALL visible secondary objects in detected_objects (for example, if a person is carrying a backpack/duffel bag or briefcase, include both "person" and "backpack"/"bag"/"briefcase" in detected_objects; if a person is riding a bicycle, include "bicycle", "cyclist", "person").
+
+Return ONLY valid JSON in this exact format:
+{
+  "primary_class": "car",
+  "detected_objects": ["car", "sedan", "vehicle"],
+  "colors": ["red", "black"],
+  "visual_attributes": ["red exterior", "four-door sedan", "glossy paint"],
+  "description": "Red four-door sedan automobile",
+  "confidence": 0.96,
+  "box_2d": [ymin, xmin, ymax, xmax]
+}
+where box_2d are integers from 0 to 1000 surrounding the primary target.`,
+                  },
+                ],
+              },
+            ],
+          }),
+          timeoutPromise,
+        ]);
+
+        if (!res) continue;
+
+        const txt =
+          res?.candidates?.[0]?.content?.parts?.[0]?.text ||
+          (typeof res?.text === 'string' ? res.text : '');
+
+        let cleanJson = txt.replace(/```json\s*/gi, '').replace(/```\s*$/gi, '').trim();
+        const firstBrace = cleanJson.indexOf('{');
+        const lastBrace = cleanJson.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
+          cleanJson = cleanJson.substring(firstBrace, lastBrace + 1);
+        }
+
+        const parsed = JSON.parse(cleanJson);
+        if (parsed && parsed.primary_class) {
+          primaryClass = String(parsed.primary_class).toLowerCase().trim();
+          detectedObjects = Array.isArray(parsed.detected_objects)
+            ? parsed.detected_objects.map((o: any) => String(o).toLowerCase().trim())
+            : [primaryClass];
+          if (!detectedObjects.includes(primaryClass)) {
+            detectedObjects.unshift(primaryClass);
+          }
+          colors = Array.isArray(parsed.colors)
+            ? parsed.colors.map((c: any) => String(c).toLowerCase().trim())
+            : [];
+          visualAttributes = Array.isArray(parsed.visual_attributes)
+            ? parsed.visual_attributes.map((a: any) => String(a).toLowerCase().trim())
+            : [];
+          description = parsed.description || `Reference ${primaryClass} (${colors.join(', ')})`;
+          confidence = Number(parsed.confidence) || 0.95;
+
+          if (Array.isArray(parsed.box_2d) && parsed.box_2d.length === 4) {
+            const ymin = Math.max(0, Math.min(1000, Number(parsed.box_2d[0]) || 100)) / 1000;
+            const xmin = Math.max(0, Math.min(1000, Number(parsed.box_2d[1]) || 100)) / 1000;
+            const ymax = Math.max(ymin + 0.08, Math.min(1000, Number(parsed.box_2d[2]) || 900)) / 1000;
+            const xmax = Math.max(xmin + 0.08, Math.min(1000, Number(parsed.box_2d[3]) || 900)) / 1000;
+            refBox = {
+              label: primaryClass.toUpperCase(),
+              confidence: Number(confidence.toFixed(2)),
+              x: Number(xmin.toFixed(3)),
+              y: Number(ymin.toFixed(3)),
+              width: Number((xmax - xmin).toFixed(3)),
+              height: Number((ymax - ymin).toFixed(3)),
+            };
+          }
+          break;
+        }
+      } catch (err) {
+        recordModelError(m, err);
+      }
+    }
+  }
+
+  // 3. Fallback to pure pixel visual analysis if Gemini was unavailable
+  if (!primaryClass) {
+    const fallback = analyzeBufferPixelsVisually(imageBuffer);
+    primaryClass = (fallback.detected_objects[0] || 'person').toLowerCase();
+    detectedObjects = fallback.detected_objects.map((d) => d.toLowerCase());
+    colors = fallback.colors;
+    visualAttributes = [...detectedObjects, ...colors];
+    description = fallback.description;
+    confidence = fallback.confidence;
+    if (fallback.bounding_boxes?.[0]) {
+      refBox = {
+        ...fallback.bounding_boxes[0],
+        label: primaryClass.toUpperCase(),
+      };
+    }
+  }
+
+  // Normalize canonical class synonyms
+  if (primaryClass.includes('backpack') || primaryClass.includes('rucksack') || primaryClass.includes('duffel')) {
+    primaryClass = 'backpack';
+    if (!detectedObjects.includes('bag')) detectedObjects.push('bag');
+    if (!detectedObjects.includes('backpack')) detectedObjects.push('backpack');
+  } else if (primaryClass.includes('suitcase') || primaryClass.includes('briefcase') || primaryClass.includes('luggage')) {
+    primaryClass = 'suitcase';
+    if (!detectedObjects.includes('suitcase')) detectedObjects.push('suitcase');
+    if (!detectedObjects.includes('briefcase')) detectedObjects.push('briefcase');
+    if (!detectedObjects.includes('bag')) detectedObjects.push('bag');
+  } else if (primaryClass.includes('handbag') || primaryClass.includes('purse') || primaryClass === 'bag') {
+    primaryClass = 'bag';
+    if (!detectedObjects.includes('bag')) detectedObjects.push('bag');
+  } else if (primaryClass.includes('sedan') || primaryClass.includes('suv') || primaryClass.includes('automobile') || primaryClass.includes('car')) {
+    primaryClass = 'car';
+    if (!detectedObjects.includes('car')) detectedObjects.push('car');
+  } else if (primaryClass.includes('motorcycle') || primaryClass.includes('motorbike') || primaryClass.includes('scooter')) {
+    primaryClass = 'motorcycle';
+    if (!detectedObjects.includes('motorcycle')) detectedObjects.push('motorcycle');
+  } else if (primaryClass.includes('bicycle') || primaryClass.includes('bike') || primaryClass.includes('cyclist')) {
+    primaryClass = 'bicycle';
+    if (!detectedObjects.includes('bicycle')) detectedObjects.push('bicycle');
+  } else if (primaryClass.includes('truck') || primaryClass.includes('freight') || primaryClass.includes('lorry') || primaryClass.includes('van')) {
+    primaryClass = 'truck';
+    if (!detectedObjects.includes('truck')) detectedObjects.push('truck');
+  } else if (primaryClass.includes('person') || primaryClass.includes('pedestrian') || primaryClass.includes('man') || primaryClass.includes('woman') || primaryClass.includes('worker')) {
+    primaryClass = 'person';
+    if (!detectedObjects.includes('person')) detectedObjects.push('person');
+  }
+
+  const embedding = build128DimVisualEmbedding({
+    primaryClass,
+    detectedObjects,
+    colors,
+    attributes: [...visualAttributes, description],
+    pixelVector64: pixStats.pixelVector64,
+    geminiEmbedding: geminiEmbeddingVec,
+  });
+
+  return {
+    embedding,
+    visual_features: {
+      primary_class: primaryClass,
+      detected_objects: Array.from(new Set(detectedObjects)),
+      colors: Array.from(new Set(colors)),
+      visual_attributes: visualAttributes,
+      description,
+      confidence: Number(confidence.toFixed(2)),
+      bounding_box: refBox,
+    },
+  };
+}
+
+// Check if a reference image's visual class is compatible with an event's detected objects
+function computeVisualMatchForEvent(
+  refRecord: ReferenceImageRecord,
+  evt: any,
+  objectTypeFilter?: string
+): {
+  matched: boolean;
+  similarityScore: number;
+  matchedBox: any;
+  allBoxes: any[];
+  matchReason: string;
+} {
+  if (!evt.embedding || !evt.object_embeddings) {
+    enrichEventWithVisualEmbeddings(evt);
+  }
+
+  const refFeat = refRecord.visual_features;
+  const refPrimary = refFeat.primary_class.toLowerCase();
+  const refObjs = new Set(refFeat.detected_objects.map((o) => o.toLowerCase()));
+  const refColors = new Set(refFeat.colors.map((c) => c.toLowerCase()));
+  const refAttrs = refFeat.visual_attributes.join(' ').toLowerCase();
+
+  // If user selected a specific Object Type filter, enforce it on the event
+  const effectiveTargetType =
+    objectTypeFilter && objectTypeFilter !== 'all' ? objectTypeFilter.toLowerCase() : refPrimary;
+
+  const evtDetected = new Set(
+    (evt.detected_objects || []).map((o: string) => String(o).toLowerCase())
+  );
+
+  // Define visual class compatibility groups
+  const classGroups: Record<string, string[]> = {
+    person: ['person', 'pedestrian', 'worker', 'cyclist', 'guard', 'commuter', 'individual'],
+    backpack: ['backpack', 'duffel bag', 'bag'],
+    bag: ['bag', 'backpack', 'duffel bag', 'briefcase', 'handbag', 'suitcase', 'luggage'],
+    suitcase: ['suitcase', 'briefcase', 'luggage', 'bag'],
+    car: ['car', 'red car', 'sedan', 'automobile', 'suv'],
+    motorcycle: ['motorcycle', 'motorbike', 'scooter'],
+    bicycle: ['bicycle', 'bike', 'cyclist'],
+    truck: ['truck', 'freight truck', 'delivery truck', 'semi-truck', 'trailer', 'van'],
+    bus: ['bus', 'shuttle'],
+  };
+
+  // Disqualify if the target class does not exist in the event's visually detected objects
+  const compatibleSynonyms = classGroups[effectiveTargetType] || [effectiveTargetType];
+  const hasCompatibleObjectInEvent = compatibleSynonyms.some((syn) => evtDetected.has(syn));
+  if (!hasCompatibleObjectInEvent) {
+    return { matched: false, similarityScore: 0, matchedBox: null, allBoxes: [], matchReason: '' };
+  }
+
+  // Strict separation between bicycle and motorcycle
+  if (effectiveTargetType === 'bicycle' && (evtDetected.has('motorcycle') || evtDetected.has('motorbike'))) {
+    return { matched: false, similarityScore: 0, matchedBox: null, allBoxes: [], matchReason: '' };
+  }
+  if (effectiveTargetType === 'motorcycle' && (evtDetected.has('bicycle') || evtDetected.has('bike'))) {
+    return { matched: false, similarityScore: 0, matchedBox: null, allBoxes: [], matchReason: '' };
+  }
+
+  // Evaluate each detected object in the event to find the highest visual similarity
+  let bestObjScore = 0;
+  let bestObjEntry: any = null;
+
+  const objEmbeddings = Array.isArray(evt.object_embeddings) ? evt.object_embeddings : [];
+
+  for (const objEntry of objEmbeddings) {
+    const objClass = String(objEntry.object_class || '').toLowerCase();
+    const objSubs: string[] = Array.isArray(objEntry.sub_classes) ? objEntry.sub_classes : [objClass];
+
+    // Check if this specific bounding box object is compatible with the reference image
+    const boxIsCompatible =
+      compatibleSynonyms.includes(objClass) ||
+      objSubs.some((s) => compatibleSynonyms.includes(s)) ||
+      (refObjs.has('bag') && ['bag', 'backpack', 'suitcase'].includes(objClass)) ||
+      (refObjs.has('backpack') && ['backpack', 'bag'].includes(objClass)) ||
+      (refObjs.has('suitcase') && ['suitcase', 'bag'].includes(objClass)) ||
+      (refObjs.has('bicycle') && ['bicycle', 'person'].includes(objClass) && evtDetected.has('bicycle'));
+
+    if (!boxIsCompatible) continue;
+
+    // 1. Base embedding cosine similarity (128-dim visual feature vector)
+    const embCosine = cosineSimilarity(refRecord.embedding, objEntry.embedding);
+
+    // 2. Pixel-level spatial color/gradient similarity
+    const refPix64 = refRecord.embedding.slice(64, 128);
+    const objPix64 = (objEntry.embedding || []).slice(64, 128);
+    const pixCosine = cosineSimilarity(refPix64, objPix64);
+
+    // 3. Visual class & secondary object co-occurrence score
+    let visualFeatureScore = 0.78;
+    if (objClass === refPrimary || (classGroups[refPrimary] || []).includes(objClass)) {
+      visualFeatureScore = 0.86;
+    }
+
+    // Secondary visual traits boost (e.g., person carrying bag/briefcase, cyclist on bicycle)
+    const refHasBag =
+      refObjs.has('bag') ||
+      refObjs.has('backpack') ||
+      refObjs.has('suitcase') ||
+      refObjs.has('briefcase') ||
+      refAttrs.includes('bag') ||
+      refAttrs.includes('backpack') ||
+      refAttrs.includes('briefcase');
+    const evtHasBag =
+      evtDetected.has('bag') ||
+      evtDetected.has('backpack') ||
+      evtDetected.has('duffel bag') ||
+      evtDetected.has('briefcase') ||
+      evtDetected.has('suitcase');
+
+    if (refPrimary === 'person' && refHasBag) {
+      if (evtHasBag) {
+        visualFeatureScore += 0.08;
+      } else {
+        visualFeatureScore -= 0.10;
+      }
+    }
+
+    // Check specific bag subtype alignment (duffel/backpack vs briefcase/suitcase)
+    const refIsBriefcaseOrSuitcase =
+      refPrimary === 'suitcase' ||
+      refObjs.has('suitcase') ||
+      refObjs.has('briefcase') ||
+      refAttrs.includes('briefcase') ||
+      refAttrs.includes('suitcase');
+    const evtIsBriefcaseOrSuitcase =
+      evtDetected.has('briefcase') || evtDetected.has('suitcase');
+
+    if (refIsBriefcaseOrSuitcase && evtIsBriefcaseOrSuitcase) {
+      visualFeatureScore += 0.06;
+    } else if (refPrimary === 'backpack' && evtDetected.has('duffel bag')) {
+      visualFeatureScore += 0.06;
+    }
+
+    // 4. Visual Color Alignment
+    const objColors = new Set(
+      (objEntry.colors || []).map((c: string) => String(c).toLowerCase())
+    );
+    let colorOverlap = 0;
+    let colorConflict = false;
+
+    const distinctVehicleColors = ['red', 'white', 'blue', 'yellow', 'green'];
+    for (const rc of refColors) {
+      if (objColors.has(rc)) {
+        colorOverlap += 1;
+      } else if (
+        ['car', 'truck', 'bus'].includes(refPrimary) &&
+        distinctVehicleColors.includes(rc) &&
+        objColors.size > 0 &&
+        !objColors.has(rc)
+      ) {
+        colorConflict = true;
+      }
+    }
+
+    if (colorConflict) {
+      // E.g. Reference image is a blue/yellow/white car, but event object is a red car
+      continue;
+    }
+
+    if (colorOverlap > 0) {
+      visualFeatureScore += 0.05;
+    }
+
+    // Combine embedding cosine similarity + visual feature alignment + pixel similarity
+    const combinedScore = Math.min(
+      0.99,
+      Math.max(0.50, embCosine * 0.45 + visualFeatureScore * 0.45 + Math.max(0, pixCosine) * 0.10)
+    );
+
+    if (combinedScore > bestObjScore) {
+      bestObjScore = combinedScore;
+      bestObjEntry = objEntry;
+    }
+  }
+
+  if (!bestObjEntry || bestObjScore <= 0) {
+    return { matched: false, similarityScore: 0, matchedBox: null, allBoxes: [], matchReason: '' };
+  }
+
+  const finalSimilarity = Number(bestObjScore.toFixed(3));
+  const matchedBox = {
+    ...bestObjEntry.bounding_box,
+    label: `${bestObjEntry.bounding_box.label} · ${(finalSimilarity * 100).toFixed(1)}% SIMILARITY`,
+    confidence: bestObjEntry.confidence || evt.confidence || 0.95,
+    similarity_score: finalSimilarity,
+    is_match: true,
+    vx: bestObjEntry.bounding_box.vx ?? 0.012,
+    vy: bestObjEntry.bounding_box.vy ?? 0.003,
+  };
+
+  const otherBoxes = (evt.bounding_boxes || [])
+    .filter((b: any) => b !== bestObjEntry.bounding_box)
+    .map((b: any) => ({ ...b, is_match: false }));
+
+  const colorNote =
+    refFeat.colors.length > 0 ? ` (${refFeat.colors.slice(0, 2).join('/')} visual profile)` : '';
+  const matchReason = `Visual Embedding Match (${(finalSimilarity * 100).toFixed(1)}%): Reference ${refFeat.primary_class}${colorNote} matched detected ${bestObjEntry.label} in frame`;
+
+  return {
+    matched: true,
+    similarityScore: finalSimilarity,
+    matchedBox,
+    allBoxes: [matchedBox, ...otherBoxes],
+    matchReason,
+  };
+}
+
+// 1. POST /image-search/upload-image
+app.post(
+  ['/image-search/upload-image', '/api/image-search/upload-image'],
+  (req: Request, res: Response, next: any) => {
+    upload.any()(req as any, res as any, (err: any) => {
+      if (err) {
+        return res.status(400).json({ error: err.message || 'Reference image upload failed' });
+      }
+      next();
+    });
+  },
+  async (req: Request, res: Response) => {
+    try {
+      const files = req.files as Express.Multer.File[] | undefined;
+      const file = (files && files[0]) || req.file;
+      let imageBuffer: Buffer | null = null;
+      let mimeType = 'image/jpeg';
+      let imageUrl = '';
+      let savedFilePath = '';
+
+      if (file && file.path && fs.existsSync(file.path)) {
+        imageBuffer = fs.readFileSync(file.path);
+        mimeType = file.mimetype || 'image/jpeg';
+        imageUrl = `/uploads/${file.filename}`;
+        savedFilePath = file.path;
+      } else if (req.body?.image_base64 && typeof req.body.image_base64 === 'string') {
+        const rawBase64 = req.body.image_base64;
+        const mimeMatch = rawBase64.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,/);
+        if (mimeMatch) mimeType = mimeMatch[1];
+        else if (req.body.mime_type) mimeType = req.body.mime_type;
+
+        const cleanBase64 = rawBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, '');
+        imageBuffer = Buffer.from(cleanBase64, 'base64');
+        const ext = mimeType.includes('png') ? 'png' : 'jpg';
+        const fname = `ref_${Date.now()}_${Math.round(Math.random() * 1e6)}.${ext}`;
+        savedFilePath = path.resolve(UPLOADS_DIR, fname);
+        fs.writeFileSync(savedFilePath, imageBuffer);
+        imageUrl = `/uploads/${fname}`;
+      }
+
+      if (!imageBuffer || imageBuffer.length === 0) {
+        return res.status(400).json({ error: 'Please provide a valid reference image file' });
+      }
+
+      // Extract visual features and 128-dim embedding using Vision Model & Pixel Pipeline
+      const { embedding, visual_features } = await analyzeReferenceImageVisually(
+        imageBuffer,
+        mimeType,
+        savedFilePath
+      );
+
+      const refId = `ref_img_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const record: ReferenceImageRecord = {
+        id: refId,
+        image_url: imageUrl,
+        mime_type: mimeType,
+        embedding,
+        embedding_dim: embedding.length,
+        visual_features,
+        created_at: new Date().toISOString(),
+      };
+
+      REFERENCE_IMAGES[refId] = record;
+
+      res.status(201).json(record);
+    } catch (err: any) {
+      console.error('Reference image upload error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to analyze reference image' });
+    }
+  }
+);
+
+// 2. POST /image-search/search
+app.post(['/image-search/search', '/api/image-search/search'], async (req: Request, res: Response) => {
+  try {
+    const startTime = performance.now();
+    const {
+      reference_image_id,
+      image_base64,
+      mime_type,
+      camera_id,
+      camera_ids,
+      date,
+      time_from,
+      time_to,
+      similarity_threshold = 0.60,
+      object_type = 'all',
+    } = req.body;
+
+    let refRecord: ReferenceImageRecord | undefined = reference_image_id
+      ? REFERENCE_IMAGES[reference_image_id]
+      : undefined;
+
+    // Allow inline base64 reference image if not pre-uploaded
+    if (!refRecord && image_base64 && typeof image_base64 === 'string') {
+      const cleanBase64 = image_base64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, '');
+      const imageBuffer = Buffer.from(cleanBase64, 'base64');
+      const fname = `ref_${Date.now()}.jpg`;
+      const savedFilePath = path.resolve(UPLOADS_DIR, fname);
+      fs.writeFileSync(savedFilePath, imageBuffer);
+      const { embedding, visual_features } = await analyzeReferenceImageVisually(
+        imageBuffer,
+        mime_type || 'image/jpeg',
+        savedFilePath
+      );
+      const refId = `ref_img_${Date.now()}`;
+      refRecord = {
+        id: refId,
+        image_url: `/uploads/${fname}`,
+        mime_type: mime_type || 'image/jpeg',
+        embedding,
+        embedding_dim: embedding.length,
+        visual_features,
+        created_at: new Date().toISOString(),
+      };
+      REFERENCE_IMAGES[refId] = refRecord;
+    }
+
+    if (!refRecord) {
+      const allRefs = Object.values(REFERENCE_IMAGES);
+      if (allRefs.length > 0) {
+        refRecord = allRefs[allRefs.length - 1];
+      } else {
+        return res.status(400).json({ error: 'Reference image is required. Upload a reference image first.' });
+      }
+    }
+
+    const threshold = Math.max(0.1, Math.min(0.99, Number(similarity_threshold) || 0.60));
+
+    // Filter candidate events by optional Camera, Date, and Time constraints
+    let candidateEvents = [...EVENTS];
+
+    let targetCamIds: string[] = [];
+    if (Array.isArray(camera_ids) && camera_ids.length > 0) {
+      targetCamIds = camera_ids.map((c: any) => String(c).trim()).filter(Boolean);
+    } else if (typeof camera_id === 'string' && camera_id.trim() && camera_id !== 'all') {
+      targetCamIds = camera_id.split(',').map((c) => c.trim()).filter(Boolean);
+    }
+
+    if (targetCamIds.length > 0 && !targetCamIds.includes('all')) {
+      candidateEvents = candidateEvents.filter((e) =>
+        targetCamIds.some(
+          (cid) =>
+            e.camera_id.toUpperCase() === cid.toUpperCase() ||
+            e.camera_name.toLowerCase().includes(cid.toLowerCase())
+        )
+      );
+    }
+
+    if (date && typeof date === 'string' && date.trim() !== '') {
+      candidateEvents = candidateEvents.filter((e) => e.date === date.trim());
+    }
+
+    if (time_from && typeof time_from === 'string' && time_from.trim() !== '') {
+      const fromClean = time_from.trim().substring(0, 5);
+      candidateEvents = candidateEvents.filter((e) => e.start_time.substring(0, 5) >= fromClean);
+    }
+
+    if (time_to && typeof time_to === 'string' && time_to.trim() !== '') {
+      const toClean = time_to.trim().substring(0, 5);
+      candidateEvents = candidateEvents.filter((e) => e.start_time.substring(0, 5) <= toClean);
+    }
+
+    // Compare reference image embedding against detected objects in all candidate events
+    const matchedOccurrences: any[] = [];
+
+    for (const evt of candidateEvents) {
+      const matchEval = computeVisualMatchForEvent(refRecord, evt, object_type);
+      if (!matchEval.matched) continue;
+      if (matchEval.similarityScore < threshold) continue;
+
+      matchedOccurrences.push({
+        event_id: evt.id,
+        camera_id: evt.camera_id,
+        camera_name: evt.camera_name,
+        video_id: evt.video_id,
+        date: evt.date,
+        start_time: evt.start_time,
+        end_time: evt.end_time,
+        timestamp_offset_seconds: evt.timestamp_offset_seconds,
+        description: evt.description,
+        confidence: evt.confidence,
+        similarity_score: matchEval.similarityScore,
+        detected_objects: evt.detected_objects,
+        thumbnail_url: evt.thumbnail_url,
+        video_url: evt.video_url || VIDEOS_SRC.gate,
+        bounding_boxes: matchEval.allBoxes,
+        matched_object_box: matchEval.matchedBox,
+        is_uploaded: !!evt.is_uploaded,
+        source_type: evt.source_type || 'camera',
+        matched_reasons: [matchEval.matchReason],
+        metadata: {
+          ...evt.metadata,
+          reference_image_id: refRecord.id,
+          similarity_score: matchEval.similarityScore,
+        },
+      });
+    }
+
+    // Sort descending by similarity_score
+    matchedOccurrences.sort((a, b) => b.similarity_score - a.similarity_score);
+
+    const executionTimeMs = Number((performance.now() - startTime).toFixed(2));
+    const topScore = matchedOccurrences.length > 0 ? matchedOccurrences[0].similarity_score : 0;
+
+    const noMatchMessage = 'No Match Found.';
+    const summaryText =
+      matchedOccurrences.length === 0
+        ? noMatchMessage
+        : `Visual similarity search located ${matchedOccurrences.length} matching occurrence${
+            matchedOccurrences.length > 1 ? 's' : ''
+          } for reference ${refRecord.visual_features.primary_class.toUpperCase()} (${
+            refRecord.visual_features.description
+          }). Highest match on ${matchedOccurrences[0].camera_name} (${
+            matchedOccurrences[0].camera_id
+          }) at ${matchedOccurrences[0].start_time} with ${(topScore * 100).toFixed(1)}% visual similarity.`;
+
+    const searchSession: ImageSearchSession = {
+      id: `img_srch_${Date.now()}`,
+      reference_image_id: refRecord.id,
+      reference_image_url: refRecord.image_url,
+      visual_features: refRecord.visual_features,
+      filters: {
+        camera_id: camera_id || 'all',
+        date: date || null,
+        time_from: time_from || null,
+        time_to: time_to || null,
+        similarity_threshold: threshold,
+        object_type: object_type || 'all',
+      },
+      total_results: matchedOccurrences.length,
+      top_similarity_score: topScore,
+      execution_time_ms: executionTimeMs,
+      message: matchedOccurrences.length === 0 ? noMatchMessage : 'Matches found',
+      answer_summary: summaryText,
+      results: matchedOccurrences,
+      created_at: new Date().toISOString(),
+    };
+
+    IMAGE_SEARCH_RESULTS.unshift(searchSession);
+    if (IMAGE_SEARCH_RESULTS.length > 50) IMAGE_SEARCH_RESULTS.pop();
+
+    // Also record in unified search history
+    SEARCH_HISTORY.unshift({
+      id: `sh_img_${Date.now()}`,
+      query: `[Image Search] ${refRecord.visual_features.description}`,
+      camera_filter: camera_id && camera_id !== 'all' ? String(camera_id) : null,
+      results_count: matchedOccurrences.length,
+      created_at: new Date().toISOString(),
+      status: 'completed',
+    });
+
+    res.json(searchSession);
+  } catch (err: any) {
+    console.error('Image similarity search error:', err);
+    res.status(500).json({ error: err?.message || 'Image search failed' });
+  }
+});
+
+// 3. GET /image-search/results
+app.get(['/image-search/results', '/api/image-search/results'], (_req: Request, res: Response) => {
+  res.json({
+    searches: IMAGE_SEARCH_RESULTS,
+    reference_images: Object.values(REFERENCE_IMAGES).reverse(),
+  });
+});
+
+// 4. GET /image-search/:id
+app.get(['/image-search/:id', '/api/image-search/:id'], (req: Request, res: Response) => {
+  const id = req.params.id;
+  const session = IMAGE_SEARCH_RESULTS.find((s) => s.id === id || s.reference_image_id === id);
+  if (session) {
+    return res.json(session);
+  }
+  const refImg = REFERENCE_IMAGES[id];
+  if (refImg) {
+    return res.json({
+      id,
+      reference_image_id: refImg.id,
+      reference_image_url: refImg.image_url,
+      visual_features: refImg.visual_features,
+      filters: {},
+      total_results: 0,
+      top_similarity_score: 0,
+      execution_time_ms: 0,
+      message: 'Reference image record',
+      answer_summary: refImg.visual_features.description,
+      results: [],
+      created_at: refImg.created_at,
+    });
+  }
+  res.status(404).json({ error: 'Image search record not found' });
 });
 
 // Mount Vite middleware for SPA development

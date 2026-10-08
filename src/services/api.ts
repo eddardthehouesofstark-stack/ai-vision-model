@@ -6,6 +6,9 @@ import {
   SearchResponse,
   SearchHistoryItem,
   SystemSettings,
+  ReferenceImageRecord,
+  ImageSearchResponse,
+  ImageSearchFilters,
 } from '../types';
 
 const apiClient = axios.create({
@@ -132,5 +135,49 @@ export const api = {
   },
   clearSearchHistory: async (): Promise<void> => {
     await apiClient.delete('/search/history');
+  },
+
+  // Search by Image APIs
+  uploadReferenceImage: async (
+    formData: FormData,
+    onUploadProgress?: (progressEvent: any) => void
+  ): Promise<ReferenceImageRecord> => {
+    const res = await axios.post('/image-search/upload-image', formData, {
+      timeout: 60000,
+      onUploadProgress,
+    });
+    return res.data;
+  },
+  uploadReferenceImageBase64: async (
+    imageBase64: string,
+    mimeType = 'image/jpeg'
+  ): Promise<ReferenceImageRecord> => {
+    const res = await axios.post('/image-search/upload-image', {
+      image_base64: imageBase64,
+      mime_type: mimeType,
+    });
+    return res.data;
+  },
+  searchByImage: async (
+    params: {
+      reference_image_id?: string;
+      image_base64?: string;
+    } & ImageSearchFilters
+  ): Promise<ImageSearchResponse> => {
+    const res = await axios.post('/image-search/search', params, {
+      timeout: 60000,
+    });
+    return res.data;
+  },
+  getImageSearchResults: async (): Promise<{
+    searches: ImageSearchResponse[];
+    reference_images: ReferenceImageRecord[];
+  }> => {
+    const res = await axios.get('/image-search/results');
+    return res.data;
+  },
+  getImageSearchById: async (id: string): Promise<ImageSearchResponse> => {
+    const res = await axios.get(`/image-search/${id}`);
+    return res.data;
   },
 };

@@ -4,6 +4,7 @@ import { Sidebar } from './Sidebar';
 import { useCCTV } from '../../context/CCTVContext';
 import { DashboardPage } from '../../pages/DashboardPage';
 import { SearchPage } from '../../pages/SearchPage';
+import { ImageSearchPage } from '../../pages/ImageSearchPage';
 import { CamerasPage } from '../../pages/CamerasPage';
 import { CameraDashboardPage } from '../../pages/CameraDashboardPage';
 import { UploadPage } from '../../pages/UploadPage';
@@ -21,6 +22,8 @@ export const AppLayout: React.FC = () => {
         return <DashboardPage />;
       case 'search':
         return <SearchPage />;
+      case 'image-search':
+        return <ImageSearchPage />;
       case 'cameras':
         return <CamerasPage />;
       case 'camera-dashboard':

@@ -149,6 +149,16 @@ export const EvidenceModal: React.FC = () => {
                   </span>
                 </div>
 
+                {'similarity_score' in selectedEvidence &&
+                  typeof selectedEvidence.similarity_score === 'number' && (
+                    <div className="flex items-center justify-between text-neutral-300">
+                      <span className="text-neutral-500">Visual Similarity</span>
+                      <span className="font-mono tabular-nums text-sky-400 font-semibold">
+                        {(selectedEvidence.similarity_score * 100).toFixed(1)}%
+                      </span>
+                    </div>
+                  )}
+
                 {selectedEvidence.timestamp_offset_seconds !== undefined && (
                   <div className="flex items-center justify-between text-neutral-300">
                     <span className="text-neutral-500">Frame Offset</span>

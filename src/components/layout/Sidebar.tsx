@@ -8,6 +8,7 @@ import {
   Sliders,
   ShieldCheck,
   Disc,
+  Image,
 } from 'lucide-react';
 import { useCCTV } from '../../context/CCTVContext';
 import { ActiveTab } from '../../types';
@@ -18,6 +19,7 @@ export const Sidebar: React.FC = () => {
   const navItems: { id: ActiveTab; label: string; icon: React.ElementType }[] = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'search', label: 'Search Footage', icon: Search },
+    { id: 'image-search', label: 'Search by Image', icon: Image },
     { id: 'camera-dashboard', label: 'Camera Dashboard', icon: Video },
     { id: 'upload', label: 'Multi-Camera Upload', icon: UploadCloud },
     { id: 'cameras', label: 'Channel Settings', icon: Sliders },

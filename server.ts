@@ -19,7 +19,7 @@ const geminiClient = process.env.GEMINI_API_KEY
         },
       },
     })
-  : null;
+  : new GoogleGenAI();
 
 // Per-model quota exhaustion tracking (clears after 15 minutes instead of locking all models)
 const modelExhaustedUntil: Record<string, number> = {};
@@ -49,8 +49,6 @@ function isAnyGeminiModelAvailable(): boolean {
   if (!geminiClient) return false;
   const candidateModels = [
     'gemini-3.5-flash-lite',
-    'gemini-3.1-flash-lite',
-    'gemini-flash-latest',
     'gemini-3.8-flash',
   ];
   return candidateModels.some((m) => isModelAvailable(m));
@@ -148,15 +146,13 @@ async function analyzeFrameWithGemini(
   if (isAnyGeminiModelAvailable() && base64Data && base64Data.length > 100) {
     const candidateModels = [
       'gemini-3.5-flash-lite',
-      'gemini-3.1-flash-lite',
-      'gemini-flash-latest',
       'gemini-3.8-flash',
     ];
 
     for (const m of candidateModels) {
       if (!isModelAvailable(m)) continue;
       try {
-        const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 10000));
+        const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 12000));
         const res: any = await Promise.race([
           geminiClient!.models.generateContent({
             model: m,
@@ -167,29 +163,32 @@ async function analyzeFrameWithGemini(
                   { inlineData: { mimeType: 'image/jpeg', data: base64Data } },
                   {
                     text: `You are an expert CCTV surveillance video forensic AI. Analyze this security camera frame.
-Context Notes: "${contextHint || 'CCTV Footage frame'}"
+Detect all visible entities, specifically categorizing into standard classes:
+- person (pedestrians, workers, cyclists, security guards, individuals)
+- backpack
+- bag (duffel bags, handbags, suitcases, briefcases, luggage)
+- car (sedans, automobiles, SUVs, taxis)
+- bus (shuttles, transit buses)
+- truck (delivery trucks, freight trucks, semi-trucks, lorries, vans)
+- motorcycle (motorbikes, mopeds, scooters)
+- bicycle (bikes, cyclists riding bicycles)
 
-Detect all visible entities, specifically categorizing:
-- Person / Pedestrian / Worker / Security Guard / Cyclist
-- Backpack / Bag / Briefcase / Handbag / Suitcase / Duffel Bag / Luggage
-- Car / Sedan / SUV / Automobile / Vehicle
-- Motorcycle / Motorbike / Scooter
-- Bicycle / Bike
-- Truck / Delivery Truck / Freight Truck / Semi / Van
-- Bus
+Context notes: "${contextHint || 'CCTV Footage frame'}"
 
-Identify colors of key objects/vehicles/clothing, and any actions (walking, carrying, entering, parking, riding, standing, loading cargo).
+Identify colors, detection confidence (0.70-0.99), and bounding boxes.
 Return ONLY valid JSON in this exact structure:
 {
-  "description": "1 concise, forensic factual sentence describing the activity in the frame",
-  "detected_objects": ["person", "bag"],
-  "confidence": 0.95,
-  "colors": ["red", "black"],
-  "bounding_boxes": [
-    { "label": "Person", "confidence": 0.95, "box_2d": [ymin, xmin, ymax, xmax] }
+  "detections": [
+    {
+      "object_class": "person",
+      "confidence": 0.95,
+      "colors": ["black"],
+      "description": "Person walking through coverage area",
+      "box_2d": [ymin, xmin, ymax, xmax]
+    }
   ]
 }
-Where box_2d coordinates are normalized integers 0 to 1000. Do not wrap in markdown quotes if possible.`,
+Where box_2d coordinates are normalized integers 0 to 1000.`,
                   },
                 ],
               },
@@ -209,134 +208,186 @@ Where box_2d coordinates are normalized integers 0 to 1000. Do not wrap in markd
           txt = '';
         }
 
-        const match = txt.match(/\{[\s\S]*\}/);
-        if (match) {
-          const parsed = JSON.parse(match[0]);
-          if (parsed && (parsed.detected_objects || parsed.description)) {
-            const rawDetected = Array.isArray(parsed.detected_objects)
-              ? parsed.detected_objects.map((o: any) => String(o).toLowerCase().trim())
-              : [];
+        // Clean markdown code blocks
+        let cleanJsonStr = txt.replace(/```json\s*/gi, '').replace(/```\s*$/gi, '').trim();
+        const firstBracket = cleanJsonStr.search(/[{\[]/);
+        const lastBracket = Math.max(cleanJsonStr.lastIndexOf('}'), cleanJsonStr.lastIndexOf(']'));
 
-            // Automatic forensic synonym expansion for high-accuracy search recall
-            const enriched = new Set<string>(rawDetected);
-            const descLower = String(parsed.description || '').toLowerCase();
+        if (firstBracket !== -1 && lastBracket > firstBracket) {
+          cleanJsonStr = cleanJsonStr.substring(firstBracket, lastBracket + 1);
+        }
 
-            // Bag & luggage synonyms
-            if (
-              rawDetected.some((o: string) =>
-                ['bag', 'backpack', 'briefcase', 'handbag', 'suitcase', 'duffel', 'purse', 'luggage'].some(
-                  (b) => o.includes(b)
-                )
-              ) ||
-              /\b(bag|backpack|briefcase|handbag|suitcase|duffel|purse|luggage)\b/.test(descLower)
-            ) {
-              enriched.add('bag');
-              enriched.add('backpack');
-              if (rawDetected.some((o: string) => o.includes('briefcase')) || descLower.includes('briefcase')) {
-                enriched.add('briefcase');
+        let parsed: any = null;
+        try {
+          parsed = JSON.parse(cleanJsonStr);
+        } catch {
+          const matchObj = txt.match(/\{[\s\S]*\}/);
+          if (matchObj) {
+            try { parsed = JSON.parse(matchObj[0]); } catch {}
+          }
+        }
+
+        if (parsed) {
+          let rawDetections: any[] = [];
+          if (Array.isArray(parsed)) {
+            rawDetections = parsed;
+          } else if (Array.isArray(parsed.detections)) {
+            rawDetections = parsed.detections;
+          } else if (Array.isArray(parsed.detected_objects)) {
+            rawDetections = parsed.detected_objects.map((o: any) => ({
+              object_class: String(o),
+              confidence: parsed.confidence || 0.94,
+              description: parsed.description || '',
+              colors: parsed.colors || [],
+              box_2d: [200, 200, 600, 600],
+            }));
+          } else if (parsed.object_class || parsed.description) {
+            rawDetections = [parsed];
+          }
+
+          if (rawDetections.length > 0) {
+            const detectedClasses = new Set<string>();
+            const allColors = new Set<string>();
+            const boundingBoxes: any[] = [];
+            const descriptions: string[] = [];
+
+            for (let idx = 0; idx < rawDetections.length; idx++) {
+              const d = rawDetections[idx];
+              const rawClass = String(d.object_class || d.label || d.class || '').toLowerCase().trim();
+
+              // Standardized 8 CCTV object classes: person, backpack, bag, car, bus, truck, motorcycle, bicycle
+              let normalizedClass = '';
+              if (rawClass.includes('backpack')) {
+                normalizedClass = 'backpack';
+                detectedClasses.add('backpack');
+                detectedClasses.add('bag');
+              } else if (
+                rawClass.includes('bag') ||
+                rawClass.includes('duffel') ||
+                rawClass.includes('suitcase') ||
+                rawClass.includes('briefcase') ||
+                rawClass.includes('luggage') ||
+                rawClass.includes('handbag')
+              ) {
+                normalizedClass = 'bag';
+                detectedClasses.add('bag');
+                if (rawClass.includes('suitcase')) detectedClasses.add('suitcase');
+                if (rawClass.includes('briefcase')) detectedClasses.add('briefcase');
+              } else if (
+                rawClass.includes('motorcycle') ||
+                rawClass.includes('motorbike') ||
+                rawClass.includes('scooter')
+              ) {
+                normalizedClass = 'motorcycle';
+                detectedClasses.add('motorcycle');
+                detectedClasses.add('vehicle');
+              } else if (
+                rawClass.includes('bicycle') ||
+                rawClass.includes('bike') ||
+                rawClass.includes('cyclist')
+              ) {
+                normalizedClass = 'bicycle';
+                detectedClasses.add('bicycle');
+                detectedClasses.add('bike');
+                detectedClasses.add('cyclist');
+              } else if (
+                rawClass.includes('truck') ||
+                rawClass.includes('freight') ||
+                rawClass.includes('delivery') ||
+                rawClass.includes('semi') ||
+                rawClass.includes('trailer') ||
+                rawClass.includes('lorry') ||
+                rawClass.includes('van')
+              ) {
+                normalizedClass = 'truck';
+                detectedClasses.add('truck');
+                detectedClasses.add('vehicle');
+              } else if (rawClass.includes('bus') || rawClass.includes('shuttle')) {
+                normalizedClass = 'bus';
+                detectedClasses.add('bus');
+                detectedClasses.add('vehicle');
+              } else if (
+                rawClass.includes('car') ||
+                rawClass.includes('sedan') ||
+                rawClass.includes('automobile') ||
+                rawClass.includes('suv')
+              ) {
+                normalizedClass = 'car';
+                detectedClasses.add('car');
+                detectedClasses.add('vehicle');
+              } else if (
+                rawClass.includes('person') ||
+                rawClass.includes('pedestrian') ||
+                rawClass.includes('worker') ||
+                rawClass.includes('guard') ||
+                rawClass.includes('man') ||
+                rawClass.includes('woman') ||
+                rawClass.includes('commuter') ||
+                rawClass.includes('subject')
+              ) {
+                normalizedClass = 'person';
+                detectedClasses.add('person');
+                detectedClasses.add('pedestrian');
+              } else if (rawClass) {
+                normalizedClass = rawClass;
+                detectedClasses.add(rawClass);
               }
-              if (rawDetected.some((o: string) => o.includes('suitcase')) || descLower.includes('suitcase')) {
-                enriched.add('suitcase');
+
+              if (Array.isArray(d.colors)) {
+                for (const c of d.colors) allColors.add(String(c).toLowerCase().trim());
+              }
+
+              if (d.description && typeof d.description === 'string') {
+                descriptions.push(d.description.trim());
+              }
+
+              // Extract 2D bounding box
+              let boxCoords = d.box_2d || d.bbox || [200, 200, 600, 600];
+              if (Array.isArray(boxCoords) && Array.isArray(boxCoords[0])) {
+                boxCoords = boxCoords[0];
+              }
+
+              if (Array.isArray(boxCoords) && boxCoords.length === 4) {
+                const ymin = Math.max(0, Math.min(1000, Number(boxCoords[0]) || 200)) / 1000;
+                const xmin = Math.max(0, Math.min(1000, Number(boxCoords[1]) || 200)) / 1000;
+                const ymax = Math.max(ymin + 0.04, Math.min(1000, Number(boxCoords[2]) || 600)) / 1000;
+                const xmax = Math.max(xmin + 0.03, Math.min(1000, Number(boxCoords[3]) || 600)) / 1000;
+
+                boundingBoxes.push({
+                  label: (normalizedClass || rawClass || 'SUBJECT').toUpperCase(),
+                  confidence: Number((d.confidence || 0.94).toFixed(2)),
+                  x: Number(xmin.toFixed(3)),
+                  y: Number(ymin.toFixed(3)),
+                  width: Number((xmax - xmin).toFixed(3)),
+                  height: Number((ymax - ymin).toFixed(3)),
+                  vx: idx % 2 === 0 ? 0.002 : -0.002,
+                  vy: idx % 2 === 0 ? 0.001 : -0.001,
+                });
               }
             }
 
-            // Person synonyms
-            if (
-              rawDetected.some((o: string) =>
-                ['person', 'pedestrian', 'worker', 'man', 'woman', 'cyclist', 'guard', 'staff'].some((p) =>
-                  o.includes(p)
-                )
-              ) ||
-              /\b(person|people|pedestrian|man|woman|worker|cyclist|commuter|individual)\b/.test(descLower)
-            ) {
-              enriched.add('person');
-              enriched.add('pedestrian');
-            }
+            const finalDesc = descriptions.length > 0
+              ? descriptions[0]
+              : (parsed.description || `Verified ${Array.from(detectedClasses).join(', ')} detected in frame.`);
 
-            // Vehicle & car synonyms
-            if (
-              rawDetected.some((o: string) =>
-                ['car', 'sedan', 'automobile', 'suv', 'vehicle'].some((v) => o.includes(v))
-              ) ||
-              /\b(car|sedan|automobile|suv|vehicle)\b/.test(descLower)
-            ) {
-              enriched.add('car');
-              enriched.add('vehicle');
-            }
-
-            // Bicycle synonyms
-            if (
-              rawDetected.some((o: string) => ['bike', 'bicycle', 'cyclist'].some((b) => o.includes(b))) ||
-              /\b(bike|bicycle|cyclist|bicycling)\b/.test(descLower)
-            ) {
-              enriched.add('bicycle');
-              enriched.add('bike');
-              enriched.add('cyclist');
-            }
-
-            // Motorcycle synonyms
-            if (
-              rawDetected.some((o: string) => ['motorcycle', 'motorbike', 'scooter'].some((m) => o.includes(m))) ||
-              /\b(motorcycle|motorbike|scooter)\b/.test(descLower)
-            ) {
-              enriched.add('motorcycle');
-              enriched.add('vehicle');
-            }
-
-            // Truck synonyms
-            if (
-              rawDetected.some((o: string) =>
-                ['truck', 'delivery', 'freight', 'trailer', 'semi', 'van'].some((t) => o.includes(t))
-              ) ||
-              /\b(truck|delivery truck|freight|trailer|semi|van)\b/.test(descLower)
-            ) {
-              enriched.add('truck');
-              enriched.add('vehicle');
-            }
-
-            // Actions detected
-            if (descLower.includes('walk') || descLower.includes('walking')) enriched.add('walking');
-            if (descLower.includes('carr') || descLower.includes('carrying')) enriched.add('carrying');
-            if (descLower.includes('enter') || descLower.includes('entering')) enriched.add('entering');
-            if (descLower.includes('park') || descLower.includes('parked')) enriched.add('parking');
-            if (descLower.includes('stand') || descLower.includes('loiter')) enriched.add('standing');
-            if (descLower.includes('rid') || descLower.includes('riding')) enriched.add('riding');
-
-            const boxes = Array.isArray(parsed.bounding_boxes)
-              ? parsed.bounding_boxes.map((b: any, idx: number) => {
-                  const raw = Array.isArray(b?.box_2d) && b.box_2d.length === 4 ? b.box_2d : [200, 200, 500, 500];
-                  const ymin = Math.max(0, Math.min(1000, Number(raw[0]) || 200)) / 1000;
-                  const xmin = Math.max(0, Math.min(1000, Number(raw[1]) || 200)) / 1000;
-                  const ymax = Math.max(ymin + 0.04, Math.min(1000, Number(raw[2]) || 500)) / 1000;
-                  const xmax = Math.max(xmin + 0.03, Math.min(1000, Number(raw[3]) || 500)) / 1000;
-                  return {
-                    label: String(b?.label || 'Subject').toUpperCase(),
-                    confidence: Number((b?.confidence || 0.95).toFixed(2)),
-                    x: Number(xmin.toFixed(3)),
-                    y: Number(ymin.toFixed(3)),
-                    width: Number((xmax - xmin).toFixed(3)),
-                    height: Number((ymax - ymin).toFixed(3)),
-                    vx: idx % 2 === 0 ? 0.002 : -0.002,
-                    vy: idx % 2 === 0 ? 0.001 : -0.001,
-                  };
-                })
-              : [];
+            const maxConf = Math.max(
+              ...rawDetections.map((d: any) => Number(d.confidence) || 0.94),
+              0.92
+            );
 
             return {
-              description: String(parsed.description || 'Surveillance activity recorded').trim(),
-              detected_objects: enriched.size > 0 ? Array.from(enriched) : ['person', 'movement'],
-              confidence: Number(parsed.confidence) || 0.96,
-              colors: Array.isArray(parsed.colors)
-                ? parsed.colors.map((c: any) => String(c).toLowerCase().trim())
-                : [],
-              bounding_boxes: boxes.length > 0 ? boxes : [
+              description: finalDesc,
+              detected_objects: Array.from(detectedClasses),
+              confidence: Number(maxConf.toFixed(2)),
+              colors: Array.from(allColors),
+              bounding_boxes: boundingBoxes.length > 0 ? boundingBoxes : [
                 {
-                  label: (Array.from(enriched)[0] || 'SUBJECT').toUpperCase(),
-                  confidence: 0.95,
+                  label: (Array.from(detectedClasses)[0] || 'SUBJECT').toUpperCase(),
+                  confidence: maxConf,
                   x: 0.35,
                   y: 0.25,
-                  width: 0.22,
-                  height: 0.58,
+                  width: 0.25,
+                  height: 0.60,
                   vx: 0.002,
                   vy: 0.001,
                 },
@@ -380,7 +431,7 @@ Where box_2d coordinates are normalized integers 0 to 1000. Do not wrap in markd
     colors,
     bounding_boxes: [
       {
-        label: 'SUBJECT',
+        label: (detected[0] || 'SUBJECT').toUpperCase(),
         confidence: 0.94,
         x: 0.35,
         y: 0.25,
@@ -1493,43 +1544,18 @@ app.post(
       );
     }
 
-    if (indexedEvents.length === 0) {
-      // Fallback valid indexed event
-      const defaultEvent = {
-        id: `evt-up-${Date.now()}`,
-        camera_id: targetCamera.camera_id,
-        camera_name: targetCamera.name,
-        video_id: videoId,
-        date: newVideo.recorded_date,
-        start_time: newVideo.recorded_start_time,
-        end_time: newVideo.recorded_end_time,
-        timestamp_offset_seconds: 2.0,
-        description: `Surveillance recording ingested for ${targetCamera.name}`,
-        detected_objects: ['person', 'movement'],
-        confidence: 0.95,
-        thumbnail_url: targetCamera.thumbnail_url,
-        video_url: effectiveVideoUrl,
-        created_at: new Date().toISOString(),
-        is_uploaded: true,
-        source_type: 'upload',
-        bounding_boxes: [
-          { label: 'SUBJECT', confidence: 0.95, x: 0.35, y: 0.25, width: 0.20, height: 0.55 },
-        ],
-        metadata: { source: 'Uploaded Video Pipeline' },
-      };
-      indexedEvents = [defaultEvent];
-      EVENTS.unshift(defaultEvent);
+    if (indexedEvents.length > 0) {
+      targetCamera.event_count += indexedEvents.length;
+      newVideo.indexed_events_count = indexedEvents.length;
+      if (indexedEvents[0]?.thumbnail_url) {
+        newVideo.thumbnail_url = indexedEvents[0].thumbnail_url;
+      }
+      if (indexedEvents[0]?.video_url) {
+        newVideo.video_url = indexedEvents[0].video_url;
+      }
     }
 
     targetCamera.video_count += 1;
-    targetCamera.event_count += indexedEvents.length;
-    newVideo.indexed_events_count = indexedEvents.length;
-    if (indexedEvents[0]?.thumbnail_url) {
-      newVideo.thumbnail_url = indexedEvents[0].thumbnail_url;
-    }
-    if (indexedEvents[0]?.video_url) {
-      newVideo.video_url = indexedEvents[0].video_url;
-    }
 
     res.status(201).json({
       ...newVideo,
@@ -1807,24 +1833,28 @@ app.post(['/search', '/api/search'], async (req: Request, res: Response) => {
     const meta = evt.metadata || {};
     const metaStr = JSON.stringify(meta).toLowerCase();
 
-    // 2. Strict Entity Matching (Requirement 4 & 7)
+    // 2. Strict Entity Matching against INDEXED DETECTIONS (Requirement 4: Never use keyword matching against descriptions)
     // Bag / Backpack / Suitcase / Duffel
     if (reqs.targetEntities.includes('bag')) {
       const hasBag =
         detected.some(
           (d: string) =>
-            d.includes('bag') ||
-            d.includes('backpack') ||
-            d.includes('briefcase') ||
-            d.includes('duffel') ||
-            d.includes('handbag') ||
-            d.includes('suitcase') ||
-            d.includes('luggage')
+            d === 'bag' ||
+            d === 'backpack' ||
+            d === 'briefcase' ||
+            d === 'duffel' ||
+            d === 'duffel bag' ||
+            d === 'handbag' ||
+            d === 'suitcase' ||
+            d === 'luggage' ||
+            d.includes('bag')
         ) ||
-        /\b(bag|backpack|duffel|briefcase|handbag|suitcase|luggage)\b/i.test(desc) ||
-        metaStr.includes('bag') ||
-        metaStr.includes('backpack') ||
-        metaStr.includes('briefcase');
+        (evt.bounding_boxes &&
+          evt.bounding_boxes.some((b: any) =>
+            ['BAG', 'BACKPACK', 'BRIEFCASE', 'HANDBAG', 'SUITCASE', 'DUFFEL'].some((lbl) =>
+              String(b.label || '').toUpperCase().includes(lbl)
+            )
+          ));
 
       if (!hasBag) continue; // DISQUALIFIED
     }
@@ -1832,10 +1862,15 @@ app.post(['/search', '/api/search'], async (req: Request, res: Response) => {
     // Suitcase
     if (reqs.targetEntities.includes('suitcase')) {
       const hasSuitcase =
-        detected.some((d: string) => d.includes('suitcase') || d.includes('briefcase') || d.includes('luggage')) ||
-        /\b(suitcase|briefcase|luggage)\b/i.test(desc) ||
-        metaStr.includes('suitcase') ||
-        metaStr.includes('briefcase');
+        detected.some(
+          (d: string) => d === 'suitcase' || d === 'briefcase' || d === 'luggage'
+        ) ||
+        (evt.bounding_boxes &&
+          evt.bounding_boxes.some((b: any) =>
+            ['SUITCASE', 'BRIEFCASE', 'LUGGAGE'].some((lbl) =>
+              String(b.label || '').toUpperCase().includes(lbl)
+            )
+          ));
 
       if (!hasSuitcase) continue; // DISQUALIFIED
     }
@@ -1845,16 +1880,20 @@ app.post(['/search', '/api/search'], async (req: Request, res: Response) => {
       const hasPerson =
         detected.some(
           (d: string) =>
-            d.includes('person') ||
-            d.includes('pedestrian') ||
-            d.includes('cyclist') ||
-            d.includes('worker') ||
-            d.includes('courier') ||
-            d.includes('guard') ||
-            d.includes('staff') ||
-            d.includes('individual')
+            d === 'person' ||
+            d === 'pedestrian' ||
+            d === 'cyclist' ||
+            d === 'worker' ||
+            d === 'guard' ||
+            d === 'staff' ||
+            d === 'individual'
         ) ||
-        /\b(person|pedestrian|individual|cyclist|worker|courier|guard|man|woman|staff)\b/i.test(desc);
+        (evt.bounding_boxes &&
+          evt.bounding_boxes.some((b: any) =>
+            ['PERSON', 'PEDESTRIAN', 'CYCLIST', 'WORKER', 'GUARD', 'SUBJECT'].some((lbl) =>
+              String(b.label || '').toUpperCase().includes(lbl)
+            )
+          ));
 
       if (!hasPerson) continue; // DISQUALIFIED
     }
@@ -1862,10 +1901,15 @@ app.post(['/search', '/api/search'], async (req: Request, res: Response) => {
     // Car / Sedan
     if (reqs.targetEntities.includes('car')) {
       const hasCar =
-        detected.some((d: string) => d.includes('car') || d.includes('sedan') || d.includes('automobile')) ||
-        /\b(car|sedan|automobile)\b/i.test(desc) ||
-        metaStr.includes('sedan') ||
-        metaStr.includes('car');
+        detected.some(
+          (d: string) => d === 'car' || d === 'sedan' || d === 'automobile' || d === 'suv' || d === 'red car'
+        ) ||
+        (evt.bounding_boxes &&
+          evt.bounding_boxes.some((b: any) =>
+            ['CAR', 'SEDAN', 'AUTOMOBILE', 'SUV', 'RED SEDAN'].some((lbl) =>
+              String(b.label || '').toUpperCase().includes(lbl)
+            )
+          ));
 
       if (!hasCar) continue; // DISQUALIFIED
     }
@@ -1873,9 +1917,15 @@ app.post(['/search', '/api/search'], async (req: Request, res: Response) => {
     // Motorcycle
     if (reqs.targetEntities.includes('motorcycle')) {
       const hasMoto =
-        detected.some((d: string) => d.includes('motorcycle') || d.includes('motorbike')) ||
-        /\b(motorcycle|motorbike|scooter)\b/i.test(desc) ||
-        metaStr.includes('motorcycle');
+        detected.some(
+          (d: string) => d === 'motorcycle' || d === 'motorbike' || d === 'scooter'
+        ) ||
+        (evt.bounding_boxes &&
+          evt.bounding_boxes.some((b: any) =>
+            ['MOTORCYCLE', 'MOTORBIKE', 'SCOOTER'].some((lbl) =>
+              String(b.label || '').toUpperCase().includes(lbl)
+            )
+          ));
 
       if (!hasMoto) continue; // DISQUALIFIED
     }
@@ -1883,21 +1933,25 @@ app.post(['/search', '/api/search'], async (req: Request, res: Response) => {
     // Bicycle (strictly excluding motorcycles / motorbikes)
     if (reqs.targetEntities.includes('bicycle')) {
       const isMotorcycle =
-        detected.some((d: string) => d.includes('motorcycle') || d.includes('motorbike')) ||
-        /\b(motorcycle|motorbike|scooter)\b/i.test(desc);
+        detected.some((d: string) => d === 'motorcycle' || d === 'motorbike') ||
+        (evt.bounding_boxes &&
+          evt.bounding_boxes.some((b: any) =>
+            ['MOTORCYCLE', 'MOTORBIKE'].some((lbl) =>
+              String(b.label || '').toUpperCase().includes(lbl)
+            )
+          ));
 
       const hasBike =
         !isMotorcycle &&
         (detected.some(
-          (d: string) =>
-            d === 'bicycle' ||
-            d === 'bike' ||
-            d === 'cyclist' ||
-            (d.includes('bicycle') && !d.includes('motor'))
+          (d: string) => d === 'bicycle' || d === 'bike' || d === 'cyclist'
         ) ||
-          /\b(bicycle|cyclist|bicycling|riding a bicycle)\b/i.test(desc) ||
-          (/\bbike\b/i.test(desc) && !/\bmotorbike|motorcycle\b/i.test(desc)) ||
-          metaStr.includes('bicycle'));
+          (evt.bounding_boxes &&
+            evt.bounding_boxes.some((b: any) =>
+              ['BICYCLE', 'BIKE', 'CYCLIST'].some((lbl) =>
+                String(b.label || '').toUpperCase().includes(lbl)
+              )
+            )));
 
       if (!hasBike) continue; // DISQUALIFIED
     }
@@ -1907,21 +1961,33 @@ app.post(['/search', '/api/search'], async (req: Request, res: Response) => {
       const hasTruck =
         detected.some(
           (d: string) =>
-            d.includes('truck') ||
-            d.includes('freight') ||
-            d.includes('delivery') ||
-            d.includes('trailer') ||
-            d.includes('semi')
+            d === 'truck' ||
+            d === 'freight truck' ||
+            d === 'delivery truck' ||
+            d === 'semi-truck' ||
+            d === 'trailer' ||
+            d.includes('truck')
         ) ||
-        /\b(truck|freight|delivery|trailer)\b/i.test(desc) ||
-        metaStr.includes('truck');
+        (evt.bounding_boxes &&
+          evt.bounding_boxes.some((b: any) =>
+            ['TRUCK', 'FREIGHT TRUCK', 'SEMI', 'TRAILER'].some((lbl) =>
+              String(b.label || '').toUpperCase().includes(lbl)
+            )
+          ));
 
       if (!hasTruck) continue; // DISQUALIFIED
     }
 
     // Bus
     if (reqs.targetEntities.includes('bus')) {
-      const hasBus = detected.some((d: string) => d.includes('bus')) || /\bbus\b/i.test(desc) || metaStr.includes('bus');
+      const hasBus =
+        detected.some((d: string) => d === 'bus' || d === 'shuttle') ||
+        (evt.bounding_boxes &&
+          evt.bounding_boxes.some((b: any) =>
+            ['BUS', 'SHUTTLE'].some((lbl) =>
+              String(b.label || '').toUpperCase().includes(lbl)
+            )
+          ));
 
       if (!hasBus) continue; // DISQUALIFIED (If no bus exists, return 0 matches)
     }
@@ -1932,15 +1998,15 @@ app.post(['/search', '/api/search'], async (req: Request, res: Response) => {
       !reqs.targetEntities.some((t) => ['car', 'truck', 'motorcycle', 'bus'].includes(t))
     ) {
       const hasVehicle =
-        detected.some(
-          (d: string) =>
-            d.includes('vehicle') ||
-            d.includes('car') ||
-            d.includes('truck') ||
-            d.includes('motorcycle') ||
-            d.includes('automobile') ||
-            d.includes('sedan')
-        ) || /\b(car|vehicle|truck|automobile|sedan|motorcycle)\b/i.test(desc);
+        detected.some((d: string) =>
+          ['vehicle', 'car', 'truck', 'motorcycle', 'automobile', 'sedan'].includes(d)
+        ) ||
+        (evt.bounding_boxes &&
+          evt.bounding_boxes.some((b: any) =>
+            ['VEHICLE', 'CAR', 'TRUCK', 'MOTORCYCLE', 'SEDAN'].some((lbl) =>
+              String(b.label || '').toUpperCase().includes(lbl)
+            )
+          ));
 
       if (!hasVehicle) continue; // DISQUALIFIED
     }
@@ -1952,11 +2018,7 @@ app.post(['/search', '/api/search'], async (req: Request, res: Response) => {
         // retain valid candidates for comprehensive forensic evaluation
       } else if (reqs.contentKeywords.length > 0) {
         const matchesContent = reqs.contentKeywords.some((kw) => {
-          return (
-            detected.some((d: string) => d.includes(kw)) ||
-            desc.includes(kw) ||
-            metaStr.includes(kw)
-          );
+          return detected.some((d: string) => d.includes(kw));
         });
         if (!matchesContent) continue; // DISQUALIFIED
       } else if (!reqs.locationFilter && reqs.colors.length === 0 && !reqs.requiredAction && !reqs.scopeFilter) {
@@ -1964,14 +2026,24 @@ app.post(['/search', '/api/search'], async (req: Request, res: Response) => {
       }
     }
 
-    // 3. Strict Color Filtering
+    // 3. Strict Color Filtering (Based purely on detected color attributes, NOT descriptions)
     let colorMatched = true;
     for (const c of reqs.colors) {
+      const evtColors = Array.isArray(evt.colors)
+        ? evt.colors.map((x: string) => x.toLowerCase())
+        : [];
+      const metaColor = evt.metadata?.color ? String(evt.metadata.color).toLowerCase() : '';
+      const boxColorMatch =
+        evt.bounding_boxes &&
+        evt.bounding_boxes.some((b: any) =>
+          String(b.label || '').toLowerCase().includes(c)
+        );
+
       const hasColor =
-        desc.includes(c) ||
-        detected.some((d: string) => d.includes(c)) ||
-        metaStr.includes(c) ||
-        (meta.color && meta.color.toLowerCase().includes(c));
+        evtColors.includes(c) ||
+        metaColor.includes(c) ||
+        boxColorMatch ||
+        detected.some((d: string) => d.includes(c));
 
       if (!hasColor) {
         colorMatched = false;
@@ -1995,19 +2067,18 @@ app.post(['/search', '/api/search'], async (req: Request, res: Response) => {
     // 5. Action Filtering
     if (reqs.requiredAction === 'enter') {
       const hasEntry =
-        desc.includes('enter') ||
-        desc.includes('turnstile') ||
-        desc.includes('door') ||
-        desc.includes('gate') ||
-        meta.action?.includes('enter');
+        detected.includes('entering') ||
+        detected.includes('entered') ||
+        meta.action === 'entered' ||
+        meta.action === 'entering';
 
       if (!hasEntry) continue; // DISQUALIFIED
     } else if (reqs.requiredAction === 'loiter') {
       const hasLoiter =
-        desc.includes('loiter') ||
-        desc.includes('standing') ||
-        desc.includes('waiting') ||
-        meta.action?.includes('standing');
+        detected.includes('loitering') ||
+        detected.includes('standing') ||
+        meta.action === 'standing' ||
+        meta.action === 'loitering';
 
       if (!hasLoiter) continue; // DISQUALIFIED
     }

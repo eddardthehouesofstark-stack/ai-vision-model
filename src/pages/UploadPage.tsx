@@ -102,9 +102,17 @@ export const UploadPage: React.FC = () => {
     { title: 'Supabase pgvector Indexing', desc: 'Writing vector records to PostgreSQL' },
   ];
 
+  const MAX_FILE_SIZE = 28 * 1024 * 1024; // 28MB Cloud Run payload limit
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
+      if (file.size > MAX_FILE_SIZE) {
+        showNotification(
+          `File size (${(file.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 28MB platform limit. Please choose a clip under 28MB or select a test preset.`
+        );
+        return;
+      }
       setSelectedFile(file);
       const objUrl = URL.createObjectURL(file);
       setPreviewVideoUrl(objUrl);
@@ -115,6 +123,12 @@ export const UploadPage: React.FC = () => {
     e.preventDefault();
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       const file = e.dataTransfer.files[0];
+      if (file.size > MAX_FILE_SIZE) {
+        showNotification(
+          `File size (${(file.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 28MB platform limit. Please choose a clip under 28MB or select a test preset.`
+        );
+        return;
+      }
       setSelectedFile(file);
       const objUrl = URL.createObjectURL(file);
       setPreviewVideoUrl(objUrl);
@@ -123,6 +137,13 @@ export const UploadPage: React.FC = () => {
 
   const handleStartUpload = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (selectedFile && selectedFile.size > MAX_FILE_SIZE) {
+      showNotification(
+        `File size (${(selectedFile.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 28MB limit. Please select a clip under 28MB or choose a preset.`
+      );
+      return;
+    }
 
     setIsUploading(true);
     setUploadStep(0);
@@ -176,7 +197,10 @@ export const UploadPage: React.FC = () => {
       showNotification('Footage uploaded and indexed in pgvector! Ready to query.');
     } catch (err: any) {
       console.error('Video upload error:', err);
-      const errMsg = err?.response?.data?.error || err?.message || 'Upload processing failed';
+      let errMsg = err?.response?.data?.error || err?.message || 'Upload processing failed';
+      if (err?.response?.status === 413 || String(errMsg).includes('413')) {
+        errMsg = 'File size exceeds 28MB limit for Cloud Run. Please choose a smaller video clip or select a test preset.';
+      }
       showNotification(`Upload issue: ${typeof errMsg === 'string' ? errMsg : 'Failed to process video'}`);
     } finally {
       setTimeout(() => {
@@ -274,7 +298,7 @@ export const UploadPage: React.FC = () => {
                       {selectedFile.name}
                     </div>
                     <div className="text-[11px] font-mono tabular-nums text-neutral-500">
-                      {(selectedFile.size / (1024 * 1024)).toFixed(1)} MB · Ready for processing
+                      {(selectedFile.size / (1024 * 1024)).toFixed(1)} MB · Ready for processing (Max 28 MB)
                     </div>
                   </div>
                 ) : (
@@ -283,7 +307,7 @@ export const UploadPage: React.FC = () => {
                       Click or drag & drop custom CCTV recording footage here
                     </div>
                     <div className="text-[11px] text-neutral-500">
-                      Supports MP4, MKV, AVI, MOV (Or choose a preset above)
+                      Supports MP4, MKV, AVI, MOV up to 28MB (Or choose a preset above)
                     </div>
                   </div>
                 )}

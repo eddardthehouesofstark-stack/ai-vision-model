@@ -21,8 +21,31 @@ const geminiClient = process.env.GEMINI_API_KEY
     })
   : null;
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+// Gemini quota / rate-limit circuit breaker
+let geminiQuotaExhaustedUntil = 0;
+
+function isGeminiQuotaAvailable(): boolean {
+  return !!geminiClient && Date.now() > geminiQuotaExhaustedUntil;
+}
+
+function recordGeminiError(err: any) {
+  const errMsg = String(err?.message || err?.status || err || '');
+  if (
+    err?.status === 'RESOURCE_EXHAUSTED' ||
+    err?.status === 429 ||
+    err?.code === 429 ||
+    errMsg.includes('429') ||
+    errMsg.includes('RESOURCE_EXHAUSTED') ||
+    errMsg.includes('quota') ||
+    errMsg.includes('Quota')
+  ) {
+    // Trip circuit breaker for 1 hour to prevent spamming exhausted quota
+    geminiQuotaExhaustedUntil = Date.now() + 60 * 60 * 1000;
+  }
+}
+
+app.use(express.json({ limit: '30mb' }));
+app.use(express.urlencoded({ extended: true, limit: '30mb' }));
 
 // Ensure upload & thumbnail directories exist
 const UPLOADS_DIR = path.resolve(process.cwd(), 'uploads');
@@ -48,7 +71,7 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   limits: {
-    fileSize: 500 * 1024 * 1024, // 500 MB limit
+    fileSize: 28 * 1024 * 1024, // 28 MB limit (compatible with Cloud Run 32MB payload cap)
   },
 });
 
@@ -107,13 +130,14 @@ async function analyzeFrameWithGemini(
     ? imageBufferOrBase64.toString('base64')
     : (imageBufferOrBase64 || '').replace(/^data:image\/[a-z]+;base64,/, '');
 
-  if (geminiClient && base64Data && base64Data.length > 100) {
-    const models = ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
+  if (isGeminiQuotaAvailable() && base64Data && base64Data.length > 100) {
+    const models = ['gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-3.8-flash'];
     for (const m of models) {
+      if (!isGeminiQuotaAvailable()) break;
       try {
-        const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 12000));
+        const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000));
         const res: any = await Promise.race([
-          geminiClient.models.generateContent({
+          geminiClient!.models.generateContent({
             model: m,
             contents: [
               {
@@ -153,10 +177,7 @@ Where box_2d coordinates are normalized integers 0 to 1000. Do not wrap in markd
           timeoutPromise,
         ]);
 
-        if (!res) {
-          console.warn(`Gemini model ${m} timed out after 5s`);
-          continue;
-        }
+        if (!res) continue;
 
         const txt = res.text || '';
         const match = txt.match(/\{[\s\S]*\}/);
@@ -197,7 +218,8 @@ Where box_2d coordinates are normalized integers 0 to 1000. Do not wrap in markd
           }
         }
       } catch (err: any) {
-        console.warn(`Gemini vision attempt with ${m} failed:`, err?.message || err);
+        recordGeminiError(err);
+        break;
       }
     }
   }
@@ -1110,7 +1132,11 @@ app.post(
   (req: Request, res: Response, next: any) => {
     upload.single('video_file')(req as any, res as any, (err: any) => {
       if (err) {
-        console.error('Multer file upload error:', err);
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(413).json({
+            error: 'File exceeds 28MB platform limit (Cloud Run cap). Please choose a video under 28MB or select a test preset.',
+          });
+        }
         return res.status(400).json({ error: err.message || 'File upload failed' });
       }
       next();
@@ -1699,8 +1725,8 @@ app.post('/api/search', async (req: Request, res: Response) => {
 
   let aiEngine = 'forensic-indexer';
 
-  // If Gemini 3.8 Flash is available, synthesize authoritative forensic verdict
-  if (geminiClient && qualifiedResults.length > 0) {
+  // If Gemini quota is available, synthesize authoritative forensic verdict
+  if (isGeminiQuotaAvailable() && qualifiedResults.length > 0) {
     try {
       const top3 = qualifiedResults.slice(0, 3).map((r) => ({
         camera: `${r.camera_name} (${r.camera_id})`,
@@ -1710,8 +1736,8 @@ app.post('/api/search', async (req: Request, res: Response) => {
         confidence: `${(r.confidence * 100).toFixed(0)}%`,
       }));
 
-      const aiResp = await geminiClient.models.generateContent({
-        model: 'gemini-3.8-flash',
+      const aiResp = await geminiClient!.models.generateContent({
+        model: 'gemini-2.5-flash',
         contents: `You are the Lead Forensic Surveillance AI for the enterprise CCTV platform ArgusEye.
 Security Operator Question: "${cleanQuery}"
 Retrieved Video Evidence Segments:
@@ -1724,10 +1750,11 @@ Cite the exact camera channel, timestamp, and visual evidence found.`,
 
       if (aiResp.text) {
         answerSummary = aiResp.text.trim();
-        aiEngine = 'gemini-3.8-flash';
+        aiEngine = 'gemini-2.5-flash';
       }
-    } catch (aiErr) {
-      console.warn('Gemini verdict synthesis fallback to deterministic summary:', aiErr);
+    } catch (aiErr: any) {
+      recordGeminiError(aiErr);
+      // Seamlessly retain the accurate deterministic answerSummary
     }
   }
 

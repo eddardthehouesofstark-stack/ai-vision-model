@@ -1,0 +1,6 @@
+{
+  "name": "ArgusEye - Enterprise CCTV Video Search & Surveillance",
+  "description": "Enterprise surveillance platform for searching recorded CCTV footage using natural language queries, multi-camera management, and incident playback.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -139,16 +139,14 @@ export const UploadPage: React.FC = () => {
     };
 
     try {
-      await runStep(1, 30);
-      await runStep(2, 55);
-      await runStep(3, 80);
-      await runStep(4, 95);
-
       const formData = new FormData();
       if (selectedFile) {
         formData.append('video_file', selectedFile);
       } else {
         formData.append('filename', `cctv_footage_${selectedCameraId}.mp4`);
+        if (previewVideoUrl) {
+          formData.append('preset_video_url', previewVideoUrl);
+        }
       }
       formData.append('camera_id', selectedCameraId);
       formData.append('recorded_date', recordedDate);
@@ -158,15 +156,28 @@ export const UploadPage: React.FC = () => {
         formData.append('incident_notes', incidentNotes);
       }
 
+      // Smooth step updates while request runs
+      let stepTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
+        setUploadStep((prev) => Math.min(3, prev + 1));
+        setUploadPercent((prev) => Math.min(90, prev + 25));
+      }, 600);
+
       const res = await api.uploadVideo(formData);
+      if (stepTimer) {
+        clearInterval(stepTimer);
+        stepTimer = null;
+      }
+
+      setUploadStep(4);
       setUploadPercent(100);
       setLastUploadedResult(res);
       await refreshVideos();
 
       showNotification('Footage uploaded and indexed in pgvector! Ready to query.');
-    } catch (err) {
-      console.error(err);
-      showNotification('Video upload encountered an issue.');
+    } catch (err: any) {
+      console.error('Video upload error:', err);
+      const errMsg = err?.response?.data?.error || err?.message || 'Upload processing failed';
+      showNotification(`Upload issue: ${typeof errMsg === 'string' ? errMsg : 'Failed to process video'}`);
     } finally {
       setTimeout(() => {
         setIsUploading(false);

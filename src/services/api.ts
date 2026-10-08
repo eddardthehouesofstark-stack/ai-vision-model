@@ -10,7 +10,7 @@ import {
 
 const apiClient = axios.create({
   baseURL: '/api',
-  timeout: 15000,
+  timeout: 60000, // 60 seconds default timeout
   headers: {
     'Content-Type': 'application/json',
   },
@@ -60,10 +60,12 @@ export const api = {
     return res.data;
   },
   uploadVideo: async (formData: FormData): Promise<VideoRecord> => {
-    const res = await apiClient.post('/videos/upload', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
+    // Note: Do NOT explicitly pass 'Content-Type': 'multipart/form-data'.
+    // In browser Axios, setting that header explicitly strips the multipart boundary,
+    // causing multer/busboy to fail with 'Multipart: Boundary not found'.
+    // Calling axios.post directly without Content-Type lets the browser set the boundary automatically.
+    const res = await axios.post('/api/videos/upload', formData, {
+      timeout: 180000, // 3 minutes for video processing and AI frame analysis
     });
     return res.data;
   },
